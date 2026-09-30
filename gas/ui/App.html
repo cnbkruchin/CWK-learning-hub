@@ -1,0 +1,829 @@
+<script>
+(function () {
+  'use strict';
+
+  // ======================= สถานะและยูทิลิตี้ =======================
+  var state = { token: null, me: null, role: null, stack: [], submitKeys: {}, busy: false };
+  var $main = document.getElementById('main');
+  var TZ = 'Asia/Bangkok';
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try {
+      return new Intl.DateTimeFormat('th-TH', { timeZone: TZ, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
+    } catch (e) { return iso; }
+  }
+  function fmtBytes(n) {
+    n = Number(n || 0);
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+  function uuid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    var a = new Uint8Array(16); crypto.getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  }
+  /** แปลง ISO (UTC) → ค่า input datetime-local ตามเวลาไทย (+07:00 ไม่มี DST) */
+  function isoToLocalInput(iso) {
+    if (!iso) return '';
+    var d = new Date(Date.parse(iso) + 7 * 3600000);
+    return d.toISOString().slice(0, 16);
+  }
+  function localInputToIso(v) {
+    if (!v) return '';
+    var m = v.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!m) return '';
+    return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 7, +m[5])).toISOString();
+  }
+  var store = {
+    get: function (k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: function (k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+  };
+  var toastTimer;
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, 4000);
+  }
+  function h(html) { $main.innerHTML = html; $main.focus(); }
+  function q(sel, root) { return (root || document).querySelector(sel); }
+  function qa(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function on(sel, ev, fn, root) { qa(sel, root).forEach(function (el) { el.addEventListener(ev, fn); }); }
+
+  var CHIP = {
+    not_open: ['neutral', '◷'], not_submitted: ['warn', '!'], draft: ['info', '✎'], submitted: ['ok', '✓'],
+    late: ['warn', '⏰'], resubmitted: ['info', '↻'], returned: ['bad', '↩'], accepted: ['ok', '✓✓'],
+    graded: ['ok', '★'], closed: ['bad', '✕'], score_only: ['neutral', '—']
+  };
+  function chip(code, label, overdue) {
+    var c = CHIP[code] || ['neutral', '•'];
+    var cls = overdue && code === 'not_submitted' ? 'bad' : c[0];
+    return '<span class="chip ' + cls + '"><span aria-hidden="true">' + c[1] + '</span>' + esc(label) + (overdue && code === 'not_submitted' ? ' (เลยกำหนด)' : '') + '</span>';
+  }
+  var KIND = { individual: 'งานเดี่ยว', group: 'งานกลุ่ม', exam: 'สอบ', score_only: 'รับคะแนนอย่างเดียว' };
+
+  // ======================= เรียกเซิร์ฟเวอร์ =======================
+  function rawCall(action, payload) {
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (err) {
+          reject({ code: 'NETWORK', message: 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่', detail: String(err && err.message || err) });
+        })
+        .apiCall({ action: action, token: state.token, payload: payload || {} });
+    });
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  /** opts.retry = จำนวนครั้งลองใหม่เมื่อเน็ตหลุดหรือระบบไม่ว่าง (ใช้กับคำสั่งที่ทำซ้ำได้อย่างปลอดภัยเท่านั้น) */
+  function api(action, payload, opts) {
+    opts = opts || {};
+    var attempt = 0;
+    function run() {
+      return rawCall(action, payload).then(function (res) {
+        if (res && res.ok) return res.data;
+        throw (res && res.error) || { code: 'INTERNAL', message: 'เกิดข้อผิดพลาด' };
+      }).catch(function (err) {
+        if ((err.code === 'NETWORK' || err.code === 'BUSY') && attempt < (opts.retry || 0)) {
+          attempt++;
+          return sleep(800 * Math.pow(2, attempt)).then(run);
+        }
+        if (err.code === 'SESSION_EXPIRED' || err.code === 'AUTH_REQUIRED' || err.code === 'AUTH_DISABLED') {
+          err.handled = true;
+          signOutLocal();
+          toast(err.message);
+        } else if (err.code === 'PASSWORD_CHANGE_REQUIRED') {
+          err.handled = true;
+          state.stack = [{ name: 'changePassword' }]; render();
+        }
+        throw err;
+      });
+    }
+    return run();
+  }
+  function errBox(err) {
+    return '<div class="notice bad" role="alert">' + esc(err && err.message || 'เกิดข้อผิดพลาด') + '</div>';
+  }
+
+  // ======================= นำทาง =======================
+  var views = {};
+  function go(name, params) { state.stack.push({ name: name, params: params || {} }); render(); }
+  function back() { if (state.stack.length > 1) state.stack.pop(); render(); }
+  function home() { state.stack = [{ name: homeView() }]; render(); }
+  function homeView() {
+    if (!state.token) return 'login';
+    if (state.role === 'admin') return 'adminHome';
+    if (state.role === 'teacher') return 'teacherHome';
+    return 'studentHome';
+  }
+  function render() {
+    var top = state.stack[state.stack.length - 1] || { name: homeView(), params: {} };
+    document.getElementById('topbar').hidden = !state.token;
+    h('<div class="loading">กำลังโหลด…</div>');
+    Promise.resolve().then(function () { return views[top.name](top.params || {}); }).catch(function (err) {
+      if (!state.token || (err && err.handled)) return;
+      h(backBtn() + errBox(err));
+      bindBack();
+    });
+  }
+  function backBtn() { return state.stack.length > 1 ? '<button class="btn ghost small back" data-back>← ย้อนกลับ</button>' : ''; }
+  function bindBack() { on('[data-back]', 'click', back); }
+
+  // ======================= บัญชี =======================
+  function signOutLocal() {
+    state.token = null; state.me = null; state.role = null;
+    store.set('cwk_token', null);
+    state.stack = [{ name: 'login' }];
+    render();
+  }
+  function loadMe() {
+    return api('auth.me').then(function (me) {
+      state.me = me;
+      var roles = me.roles.filter(function (r) { return ['admin', 'teacher', 'student'].indexOf(r) >= 0; });
+      state.role = store.get('cwk_role');
+      if (roles.indexOf(state.role) < 0) state.role = me.primaryRole;
+      document.getElementById('app-name').textContent = me.school && me.school.appName || 'CWK Learning Hub';
+      document.getElementById('school-name').textContent = (me.school && me.school.name || '') + ' · ' + me.displayName;
+      document.getElementById('demo-banner').hidden = !(me.school && me.school.isDemo);
+      var sw = document.getElementById('role-switch');
+      var names = { admin: 'ผู้ดูแลระบบ', teacher: 'ครู', student: 'นักเรียน' };
+      sw.hidden = roles.length < 2;
+      sw.innerHTML = roles.map(function (r) { return '<option value="' + r + '"' + (r === state.role ? ' selected' : '') + '>' + names[r] + '</option>'; }).join('');
+      refreshNotifyCount();
+      return me;
+    });
+  }
+  function refreshNotifyCount() {
+    api('notify.list').then(function (list) {
+      var n = list.filter(function (x) { return !x.read; }).length;
+      var b = document.getElementById('notify-count');
+      b.hidden = !n; b.textContent = n;
+      document.getElementById('btn-notify').setAttribute('aria-label', 'แจ้งเตือน ยังไม่อ่าน ' + n + ' รายการ');
+    }).catch(function () { /* ignore */ });
+  }
+
+  views.login = function () {
+    h('<div class="card" style="max-width:420px;margin:40px auto">' +
+      '<h1>เข้าสู่ระบบ</h1>' +
+      '<form id="login-form" novalidate>' +
+      '<label for="u">ชื่อผู้ใช้ / รหัสนักเรียน</label><input id="u" type="text" autocomplete="username" autocapitalize="off" required>' +
+      '<label for="p">รหัสผ่าน</label><input id="p" type="password" autocomplete="current-password" required>' +
+      '<div id="login-msg"></div>' +
+      '<p><button class="btn" type="submit" style="width:100%">เข้าสู่ระบบ</button></p>' +
+      '<p class="muted small">ลืมรหัสผ่าน กรุณาติดต่อครูหรือผู้ดูแลระบบของโรงเรียน</p>' +
+      '</form></div>');
+    q('#login-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var btn = q('#login-form button'); btn.disabled = true;
+      api('auth.login', { username: q('#u').value, password: q('#p').value, userAgent: navigator.userAgent }).then(function (r) {
+        state.token = r.token; store.set('cwk_token', r.token);
+        if (r.mustChangePassword) { state.stack = [{ name: 'changePassword' }]; render(); return; }
+        return loadMe().then(home);
+      }).catch(function (err) {
+        q('#login-msg').innerHTML = errBox(err); btn.disabled = false; q('#p').value = ''; q('#p').focus();
+      });
+    });
+    q('#u').focus();
+  };
+
+  views.changePassword = function () {
+    h('<div class="card" style="max-width:420px;margin:40px auto"><h1>ตั้งรหัสผ่านใหม่</h1>' +
+      '<p class="muted">รหัสผ่านอย่างน้อย 8 ตัวอักษร และไม่มีชื่อผู้ใช้อยู่ในรหัส</p>' +
+      '<form id="pw-form"><label for="o">รหัสผ่านปัจจุบัน/ชั่วคราว</label><input id="o" type="password" autocomplete="current-password">' +
+      '<label for="n1">รหัสผ่านใหม่</label><input id="n1" type="password" autocomplete="new-password">' +
+      '<label for="n2">ยืนยันรหัสผ่านใหม่</label><input id="n2" type="password" autocomplete="new-password">' +
+      '<div id="pw-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" id="pw-cancel">ออกจากระบบ</button></p></form></div>');
+    on('#pw-cancel', 'click', logout);
+    q('#pw-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (q('#n1').value !== q('#n2').value) { q('#pw-msg').innerHTML = errBox({ message: 'รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน' }); return; }
+      api('auth.changePassword', { oldPassword: q('#o').value, newPassword: q('#n1').value }).then(function (r) {
+        state.token = r.token; store.set('cwk_token', r.token); toast('เปลี่ยนรหัสผ่านแล้ว');
+        return loadMe().then(home);
+      }).catch(function (err) { q('#pw-msg').innerHTML = errBox(err); });
+    });
+  };
+
+  function logout() {
+    var t = state.token;
+    signOutLocal();
+    if (t) rawCall('auth.logout', {}).catch(function () {});
+  }
+
+  views.notifications = function () {
+    return api('notify.list').then(function (list) {
+      h(backBtn() + '<h1>แจ้งเตือน</h1><div class="card">' + (list.length ? '<ul class="list">' + list.map(function (n) {
+        return '<li><div><strong>' + (n.read ? '' : '● ') + esc(n.title) + '</strong><div class="small">' + esc(n.body) + '</div></div><div class="small muted">' + fmtDate(n.createdAt) + '</div></li>';
+      }).join('') + '</ul>' : '<div class="empty">ยังไม่มีแจ้งเตือน</div>') + '</div>');
+      bindBack();
+      var unread = list.filter(function (n) { return !n.read; }).map(function (n) { return n.id; });
+      if (unread.length) api('notify.markRead', { ids: unread }).then(refreshNotifyCount).catch(function () {});
+    });
+  };
+
+  // ======================= นักเรียน =======================
+  views.studentHome = function () {
+    return api('student.courses').then(function (courses) {
+      h('<h1>รายวิชาของฉัน</h1>' + (courses.length ? '<div class="grid">' + courses.map(function (c) {
+        return '<div class="card clickable" data-off="' + esc(c.offeringId) + '" tabindex="0" role="button">' +
+          '<div class="small muted">ปี ' + esc(c.yearBe) + ' ภาค ' + esc(c.termNo) + '</div>' +
+          '<h3>' + esc(c.courseCode) + ' ' + esc(c.courseName) + '</h3>' +
+          '<div class="small">กลุ่มเรียน ' + esc(c.section) + ' · ' + esc(c.teacherName) + '</div>' +
+          (c.enrollmentStatus !== 'active' ? '<div class="chip neutral">สิ้นสุดการลงทะเบียน</div>' : '') + '</div>';
+      }).join('') + '</div>' : '<div class="card empty">ยังไม่มีรายวิชา</div>'));
+      qa('[data-off]').forEach(function (el) {
+        var open = function () { go('studentCourse', { offeringId: el.getAttribute('data-off'), title: el.querySelector('h3').textContent }); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+      });
+    });
+  };
+
+  views.studentCourse = function (p) {
+    return api('student.assessments', { offeringId: p.offeringId }).then(function (items) {
+      h(backBtn() + '<h1>' + esc(p.title) + '</h1>' +
+        '<p><button class="btn ghost small" id="my-folder">📁 แฟ้มงานของฉัน</button></p>' +
+        '<div class="card">' + (items.length ? '<ul class="list">' + items.map(function (a) {
+          return '<li class="clickable" data-a="' + esc(a.id) + '" tabindex="0" role="button"><div><strong>' + esc(a.code) + ' ' + esc(a.title) + '</strong>' +
+            '<div class="small muted">' + KIND[a.kind] + (a.groupName ? ' · กลุ่ม ' + esc(a.groupName) : '') +
+            ' · คะแนนเต็ม ' + esc(a.maxScore) + (a.weight ? ' · น้ำหนักในรายวิชา ' + esc(a.weight) : '') + '</div>' +
+            (a.dueAt ? '<div class="small">กำหนดส่ง ' + fmtDate(a.dueAt) + (a.extended ? ' (ขยายเวลาแล้ว)' : '') + '</div>' : '') + '</div>' +
+            '<div>' + chip(a.status, a.statusLabel, a.overdue) + (a.publishedScore !== null && a.publishedScore !== undefined ? '<div class="small">คะแนน ' + esc(a.publishedScore) + '/' + esc(a.maxScore) + '</div>' : '') + '</div></li>';
+        }).join('') + '</ul>' : '<div class="empty">ยังไม่มีงานที่ครูประกาศ</div>') + '</div>');
+      bindBack();
+      on('#my-folder', 'click', function () { go('studentFolder', { offeringId: p.offeringId }); });
+      qa('[data-a]').forEach(function (el) {
+        var open = function () { go('studentAssessment', { assessmentId: el.getAttribute('data-a') }); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
+      });
+    });
+  };
+
+  function fileRows(files, opts) {
+    opts = opts || {};
+    if (!files || !files.length) return '<div class="muted small">ไม่มีไฟล์</div>';
+    return files.map(function (f) {
+      return '<div class="file-row"><div><span class="file-name">' + esc(f.name) + '</span> <span class="small muted">' + fmtBytes(f.size) + '</span></div><div>' +
+        '<button class="btn ghost small" data-open="' + esc(f.fileAssetId) + '">' + (f.preview ? 'เปิดดู' : 'ดาวน์โหลด') + '</button>' +
+        (opts.removable ? ' <button class="btn ghost small" data-remove="' + esc(f.refId) + '" aria-label="ลบ ' + esc(f.name) + ' ออกจากฉบับร่าง">ลบ</button>' : '') +
+        '</div></div>';
+    }).join('');
+  }
+
+  function versionsHtml(versions, showMembers) {
+    if (!versions.length) return '<div class="muted">ยังไม่มีการส่ง</div>';
+    return versions.map(function (v) {
+      return '<div class="card"><div class="row"><div><strong>รุ่นที่ ' + v.versionNo + '</strong> ' + (v.isLate ? '<span class="chip warn">⏰ ส่งช้า</span>' : '') +
+        ' <span class="chip ' + (v.reviewStatus === 'returned' ? 'bad' : v.reviewStatus === 'accepted' ? 'ok' : 'neutral') + '">' +
+        ({ pending: 'รอตรวจ', returned: 'ส่งคืนแก้ไข', accepted: 'รับประเมิน', superseded: 'มีรุ่นใหม่กว่า' }[v.reviewStatus] || v.reviewStatus) + '</span></div>' +
+        '<div class="small muted" style="text-align:right">รหัสยืนยัน ' + esc(v.receiptCode) + '<br>' + fmtDate(v.submittedAt) + ' โดย ' + esc(v.submittedByName) + '</div></div>' +
+        (v.comment ? '<p>' + esc(v.comment) + '</p>' : '') +
+        (v.links && v.links.length ? '<div>' + v.links.map(function (l) { return '<div><a href="' + esc(l) + '" target="_blank" rel="noopener noreferrer">' + esc(l) + '</a></div>'; }).join('') + '</div>' : '') +
+        fileRows(v.files) +
+        (showMembers && v.members ? '<div class="small muted">สมาชิก ณ เวลาส่ง: ' + v.members.map(function (m) { return esc(m.name); }).join(', ') + '</div>' : '') +
+        (v.reviewNote ? '<div class="notice warn"><strong>ข้อความจากครู:</strong> ' + esc(v.reviewNote) + '</div>' : '') + '</div>';
+    }).join('');
+  }
+
+  views.studentAssessment = function (p) {
+    return api('student.assessment', { assessmentId: p.assessmentId }).then(function (d) {
+      var a = d.assessment, w = d.window, lim = d.limits;
+      var accept = lim.allowedTypes.map(function (t) { return '.' + t; }).join(',');
+      var canSubmit = d.writable && !d.needsGroup;
+      var html = backBtn() +
+        '<div class="breadcrumb">' + KIND[a.kind] + '</div><h1>' + esc(a.code) + ' ' + esc(a.title) + '</h1>' +
+        '<p id="status-chip">' + chip(d.status, d.statusLabel) + '</p>' +
+        '<div class="card"><dl class="kv">' +
+        '<dt>คะแนนเต็ม</dt><dd>' + esc(a.maxScore) + '</dd>' +
+        (a.weight ? '<dt>น้ำหนักในรายวิชา</dt><dd>' + esc(a.weight) + '</dd>' : '') +
+        (w.openAt ? '<dt>เปิดรับ</dt><dd>' + fmtDate(w.openAt) + '</dd>' : '') +
+        (w.dueAt ? '<dt>กำหนดส่ง</dt><dd>' + fmtDate(w.dueAt) + (w.extended ? ' (ขยายเวลาให้คุณแล้ว)' : '') + '</dd>' : '') +
+        (w.hardCloseAt ? '<dt>ปิดรับ</dt><dd>' + fmtDate(w.hardCloseAt) + (w.allowLate ? ' (ส่งหลังกำหนดส่งจะถูกบันทึกว่าส่งช้า)' : '') + '</dd>' : '') +
+        (a.maxAttempts ? '<dt>ส่งได้</dt><dd>' + a.maxAttempts + ' ครั้ง</dd>' : '') +
+        '</dl>' + (a.description ? '<h3>คำชี้แจง</h3><p style="white-space:pre-wrap">' + esc(a.description) + '</p>' : '') +
+        (a.attachments && a.attachments.length ? '<h3>ไฟล์ประกอบจากครู</h3>' + fileRows(a.attachments) : '') + '</div>';
+      if (d.grade) html += '<div class="notice ok"><strong>คะแนนที่ประกาศ:</strong> ' + esc(d.grade.score) + ' / ' + esc(a.maxScore) + '</div>';
+      if (a.kind === 'group') html += '<div id="group-panel" class="card"><div class="loading">กำลังโหลดข้อมูลกลุ่ม…</div></div>';
+      if (a.submissionMode !== 'none') {
+        html += '<div class="card"><h2 style="margin-top:0">ส่งงาน</h2>';
+        if (!d.writable) html += '<div class="notice warn">' + esc(d.blockReason) + '</div>';
+        html += '<div class="notice info small">รับไฟล์: ' + esc(lim.allowedTypes.join(', ')) + ' · ไฟล์ละไม่เกิน ' + lim.maxFileMb + ' MB · ไม่เกิน ' + lim.maxFiles + ' ไฟล์ต่อการส่ง' +
+          '<br>อัปโหลดเสร็จยังไม่ถือว่าส่ง ต้องกด "ส่งงาน" และได้รับรหัสยืนยัน</div>';
+        html += '<h3>ฉบับร่าง</h3><div id="drafts">' + fileRows(d.draftFiles, { removable: canSubmit }) + '</div><div id="uploads"></div>';
+        if (canSubmit) {
+          html += '<div class="drop" id="drop"><p>ลากไฟล์มาวาง หรือ</p>' +
+            '<label class="btn ghost" for="file-input" style="display:inline-flex">เลือกไฟล์</label> ' +
+            '<label class="btn ghost" for="camera-input" style="display:inline-flex">📷 ถ่ายภาพ</label>' +
+            '<input id="file-input" type="file" multiple accept="' + esc(accept) + '" hidden>' +
+            '<input id="camera-input" type="file" accept="image/*" capture="environment" hidden></div>' +
+            '<label for="comment">คำอธิบาย (ถ้ามี)</label><textarea id="comment" maxlength="5000"></textarea>' +
+            (lim.allowLinks ? '<label for="links">ลิงก์ (บรรทัดละหนึ่งลิงก์ ขึ้นต้นด้วย https://)</label><textarea id="links"></textarea>' : '') +
+            '<div id="submit-msg"></div><p><button class="btn" id="btn-submit">ส่งงาน</button></p>';
+        }
+        html += '</div>';
+      }
+      html += '<h2>ประวัติการส่ง</h2>' + versionsHtml(d.versions, a.kind === 'group');
+      h(html);
+      bindBack();
+      bindFileButtons($main);
+      if (a.kind === 'group') renderGroupPanel(p.assessmentId);
+      on('[data-remove]', 'click', function (e) {
+        var id = e.currentTarget.getAttribute('data-remove');
+        e.currentTarget.disabled = true;
+        api('submission.removeDraft', { assessmentId: p.assessmentId, refId: id }).then(function () { toast('ลบออกจากฉบับร่างแล้ว'); render(); }).catch(function (err) { toast(err.message); render(); });
+      });
+      if (!canSubmit) return;
+      var inputs = [q('#file-input'), q('#camera-input')];
+      inputs.forEach(function (inp) { inp.addEventListener('change', function () { startUploads(p.assessmentId, Array.prototype.slice.call(inp.files), lim); inp.value = ''; }); });
+      var drop = q('#drop');
+      drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('over'); });
+      drop.addEventListener('dragleave', function () { drop.classList.remove('over'); });
+      drop.addEventListener('drop', function (e) { e.preventDefault(); drop.classList.remove('over'); startUploads(p.assessmentId, Array.prototype.slice.call(e.dataTransfer.files), lim); });
+      q('#btn-submit').addEventListener('click', function () { doSubmit(p.assessmentId, d, lim); });
+    });
+  };
+
+  // ---------- อัปโหลด ----------
+  function readB64(blob) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(String(r.result).split(',')[1] || ''); };
+      r.onerror = function () { reject({ code: 'READ', message: 'อ่านไฟล์จากเครื่องไม่สำเร็จ' }); };
+      r.readAsDataURL(blob);
+    });
+  }
+  function startUploads(assessmentId, files, lim) {
+    var box = q('#uploads');
+    var jobs = files.map(function (file) {
+      var id = 'u' + uuid().slice(0, 8);
+      box.insertAdjacentHTML('beforeend', '<div class="file-row" id="' + id + '"><div style="flex:1"><span class="file-name">' + esc(file.name) + '</span> <span class="small muted">' + fmtBytes(file.size) + '</span>' +
+        '<div class="progress" role="progressbar" aria-label="ความคืบหน้าอัปโหลด ' + esc(file.name) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div></div></div><div class="small status">รอคิว…</div></div></div>');
+      return { file: file, el: q('#' + id) };
+    });
+    // ตรวจเบื้องต้นฝั่งเครื่อง (เซิร์ฟเวอร์ตรวจซ้ำเสมอ)
+    var seq = Promise.resolve();
+    jobs.forEach(function (j) {
+      seq = seq.then(function () {
+        var ext = (j.file.name.split('.').pop() || '').toLowerCase();
+        if (lim.allowedTypes.indexOf(ext) < 0) return fail(j, 'ชนิดไฟล์นี้ไม่อนุญาต (รับ: ' + lim.allowedTypes.join(', ') + ')');
+        if (j.file.size > lim.maxFileMb * 1048576) return fail(j, 'ไฟล์ใหญ่เกิน ' + lim.maxFileMb + ' MB');
+        if (!j.file.size) return fail(j, 'ไฟล์ว่าง');
+        return uploadOne(assessmentId, j).catch(function (err) { fail(j, err.message); });
+      });
+    });
+    seq.then(function () { refreshDrafts(assessmentId); });
+  }
+  function setProgress(j, frac, text) {
+    var bar = q('.progress', j.el);
+    q('.progress > div', j.el).style.width = Math.round(frac * 100) + '%';
+    bar.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
+    q('.status', j.el).textContent = text;
+  }
+  function fail(j, msg) { q('.status', j.el).innerHTML = '<span class="chip bad">✕ ' + esc(msg) + '</span>'; }
+  function uploadOne(assessmentId, j) {
+    var file = j.file;
+    setProgress(j, 0, 'เริ่มอัปโหลด…');
+    return api('upload.begin', { assessmentId: assessmentId, fileName: file.name, size: file.size, mimeType: file.type }).then(function (b) {
+      var offset = 0;
+      function next() {
+        if (offset >= file.size) return Promise.resolve();
+        return readB64(file.slice(offset, offset + b.chunkSize)).then(function (data) {
+          return api('upload.chunk', { uploadId: b.uploadId, offset: offset, data: data }, { retry: 4 });
+        }).then(function (r) {
+          offset = r.received;
+          setProgress(j, offset / file.size, 'อัปโหลดแล้ว ' + Math.round(offset / file.size * 100) + '%');
+          return next();
+        }, function (err) {
+          if (err.code === 'UPLOAD_OUT_OF_ORDER' && err.details) { offset = err.details.received; return next(); }
+          throw err;
+        });
+      }
+      return next().then(function () {
+        setProgress(j, 1, 'กำลังตรวจไฟล์…');
+        return api('upload.finalize', { uploadId: b.uploadId }, { retry: 3 });
+      }).then(function (r) {
+        if (!r.accepted) return fail(j, r.message);
+        q('.status', j.el).innerHTML = '<span class="chip ok">✓ อยู่ในฉบับร่าง (ยังไม่ได้ส่ง)</span>';
+      });
+    });
+  }
+  function refreshDrafts(assessmentId) {
+    api('student.assessment', { assessmentId: assessmentId }).then(function (d) {
+      q('#drafts').innerHTML = fileRows(d.draftFiles, { removable: true });
+      q('#status-chip').innerHTML = chip(d.status, d.statusLabel);
+      bindFileButtons(q('#drafts'));
+      on('[data-remove]', 'click', function (e) {
+        api('submission.removeDraft', { assessmentId: assessmentId, refId: e.currentTarget.getAttribute('data-remove') }).then(function () { refreshDrafts(assessmentId); }).catch(function (err) { toast(err.message); });
+      }, q('#drafts'));
+    }).catch(function () {});
+  }
+
+  function doSubmit(assessmentId, d, lim) {
+    var btn = q('#btn-submit');
+    var msg = q('#submit-msg');
+    var links = q('#links') ? q('#links').value.split(/\n+/).map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    api('student.assessment', { assessmentId: assessmentId }).then(function (fresh) {
+      var files = fresh.draftFiles;
+      if (!files.length && !links.length) { msg.innerHTML = errBox({ message: 'ยังไม่มีไฟล์หรือลิงก์ในฉบับร่าง' }); return; }
+      if (!confirm('ยืนยันส่งงาน ' + files.length + ' ไฟล์' + (links.length ? ' และ ' + links.length + ' ลิงก์' : '') + (fresh.currentVersionNo ? ' เป็นรุ่นที่ ' + (fresh.currentVersionNo + 1) : '') + ' ?')) return;
+      btn.disabled = true; btn.textContent = 'กำลังส่ง…';
+      // ใช้คีย์เดิมจนกว่าจะสำเร็จ: กดซ้ำ/เน็ตหลุดแล้วส่งใหม่จะได้ผลเดิม ไม่สร้างรายการซ้ำ
+      var key = state.submitKeys[assessmentId] = state.submitKeys[assessmentId] || uuid();
+      return api('submission.submit', {
+        assessmentId: assessmentId, baseVersionNo: fresh.currentVersionNo, idempotencyKey: key,
+        fileAssetIds: files.map(function (f) { return f.fileAssetId; }), comment: q('#comment').value, links: links
+      }, { retry: 3 }).then(function (r) {
+        delete state.submitKeys[assessmentId];
+        showReceipt(r);
+        render();
+      });
+    }).catch(function (err) {
+      if (err.code !== 'NETWORK' && err.code !== 'BUSY') delete state.submitKeys[assessmentId];
+      msg.innerHTML = errBox(err) + (err.code === 'NETWORK' ? '<div class="small">ยังไม่ยืนยันว่าส่งสำเร็จ กด "ส่งงาน" อีกครั้งได้อย่างปลอดภัย ระบบจะไม่สร้างรายการซ้ำ</div>' : '');
+      btn.disabled = false; btn.textContent = 'ส่งงาน';
+    });
+  }
+
+  function showReceipt(r) {
+    openModal('<h2 id="modal-title" style="margin-top:0">✓ ส่งงานสำเร็จ</h2><div class="receipt">' +
+      '<p>รหัสยืนยันการส่ง<br><code>' + esc(r.receiptCode) + '</code></p>' +
+      '<dl class="kv"><dt>งาน</dt><dd>' + esc(r.assessmentTitle) + '</dd><dt>รุ่นที่</dt><dd>' + r.versionNo + '</dd>' +
+      '<dt>เวลาเซิร์ฟเวอร์</dt><dd>' + esc(r.submittedAtText) + '</dd>' +
+      (r.isLate ? '<dt>สถานะ</dt><dd><span class="chip warn">⏰ ส่งช้า</span></dd>' : '') + '</dl>' +
+      '<h3>ไฟล์ที่ส่ง</h3>' + (r.files.length ? '<ul>' + r.files.map(function (f) { return '<li>' + esc(f.name) + ' (' + fmtBytes(f.size) + ')</li>'; }).join('') + '</ul>' : '<p class="muted">ไม่มีไฟล์</p>') +
+      (r.links && r.links.length ? '<h3>ลิงก์</h3><ul>' + r.links.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul>' : '') +
+      (r.replayed ? '<p class="small muted">รายการนี้บันทึกไว้แล้วก่อนหน้า (ไม่ได้สร้างซ้ำ)</p>' : '') +
+      '<p class="small muted">บันทึกภาพหน้าจอนี้ไว้เป็นหลักฐานได้</p></div><p><button class="btn" data-close>ปิด</button></p>');
+  }
+
+  // ---------- กลุ่ม (นักเรียน) ----------
+  function renderGroupPanel(assessmentId) {
+    var panel = q('#group-panel');
+    api('group.forStudent', { assessmentId: assessmentId }).then(function (g) {
+      var s = g.settings;
+      var html = '<h2 style="margin-top:0">กลุ่ม</h2><p class="small muted">สมาชิก ' + (s.minSize === s.maxSize ? s.minSize : s.minSize + '–' + s.maxSize) + ' คน' +
+        (s.formationCloseAt ? ' · ปิดจัดกลุ่ม ' + fmtDate(s.formationCloseAt) : '') + (s.requireApproval ? ' · ครูต้องอนุมัติกลุ่ม' : '') + '</p>';
+      if (g.myGroup) {
+        var mg = g.myGroup;
+        html += '<p><strong>' + esc(mg.name) + '</strong> ' + chip(mg.frozen ? 'accepted' : 'draft', mg.statusLabel) + '</p><ul>' +
+          mg.members.map(function (m) { return '<li>' + esc(m.name) + ' (ห้อง ' + esc(m.room) + ')' + (m.isLeader ? ' — หัวหน้ากลุ่ม' : '') + '</li>'; }).join('') + '</ul>';
+        var reqs = mg.pending.filter(function (x) { return x.status === 'requested'; });
+        var invs = mg.pending.filter(function (x) { return x.status === 'invited'; });
+        if (invs.length) html += '<p class="small muted">รอตอบรับคำเชิญ: ' + invs.map(function (x) { return esc(x.name); }).join(', ') + '</p>';
+        if (reqs.length) html += '<h3>คำขอเข้าร่วม</h3>' + reqs.map(function (x) {
+          return '<div class="file-row"><span>' + esc(x.name) + '</span><span><button class="btn small" data-decide="' + x.membershipId + '" data-ok="1">รับ</button> <button class="btn ghost small" data-decide="' + x.membershipId + '" data-ok="0">ปฏิเสธ</button></span></div>';
+        }).join('');
+        if (!mg.frozen && !s.closed) {
+          html += '<label for="invite-sel">เชิญเพื่อน</label><div class="row"><select id="invite-sel">' +
+            g.classmatesWithoutGroup.map(function (c) { return '<option value="' + esc(c.studentId) + '">' + esc(c.name) + ' (ห้อง ' + esc(c.room) + ')</option>'; }).join('') +
+            '</select><button class="btn ghost" id="btn-invite"' + (g.classmatesWithoutGroup.length ? '' : ' disabled') + '>ส่งคำเชิญ</button></div>' +
+            '<p><button class="btn ghost small" id="btn-leave">ออกจากกลุ่ม</button></p>';
+        } else if (mg.frozen) {
+          html += '<p class="small muted">รายชื่อถูกตรึงแล้ว หากต้องการเปลี่ยนสมาชิกให้ติดต่อครู</p>';
+        }
+      } else {
+        html += '<div class="notice warn">คุณยังไม่มีกลุ่ม ต้องเข้ากลุ่มก่อนส่งงาน</div>';
+        if (g.invitations.length) html += '<h3>คำเชิญถึงคุณ</h3>' + g.invitations.map(function (i) {
+          return '<div class="file-row"><span>' + esc(i.groupName) + ' <span class="small muted">(' + i.members.map(esc).join(', ') + ')</span></span><span>' +
+            '<button class="btn small" data-respond="' + i.membershipId + '" data-ok="1">ตอบรับ</button> <button class="btn ghost small" data-respond="' + i.membershipId + '" data-ok="0">ปฏิเสธ</button></span></div>';
+        }).join('');
+        if (!s.closed) {
+          html += '<h3>สร้างกลุ่มใหม่</h3><div class="row"><input id="new-group" type="text" maxlength="100" placeholder="ชื่อกลุ่ม" aria-label="ชื่อกลุ่ม"><button class="btn" id="btn-create">สร้างกลุ่ม</button></div>';
+          if (g.openGroups.length) html += '<h3>ขอเข้าร่วมกลุ่ม</h3>' + g.openGroups.map(function (o) {
+            return '<div class="file-row"><span>' + esc(o.name) + ' (' + o.count + '/' + o.maxSize + ')</span><button class="btn ghost small" data-join="' + o.id + '">ขอเข้าร่วม</button></div>';
+          }).join('');
+        } else {
+          html += '<p>หมดเวลาจัดกลุ่มแล้ว กรุณาติดต่อครูเพื่อจัดกลุ่มให้</p>';
+        }
+      }
+      panel.innerHTML = html;
+      var after = function (p) { return p.then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { toast(err.message); }); };
+      on('#btn-create', 'click', function () { after(api('group.create', { assessmentId: assessmentId, name: q('#new-group').value })); }, panel);
+      on('#btn-invite', 'click', function () { after(api('group.invite', { assessmentId: assessmentId, studentId: q('#invite-sel').value })); }, panel);
+      on('#btn-leave', 'click', function () { if (confirm('ออกจากกลุ่ม?')) after(api('group.leave', { assessmentId: assessmentId })); }, panel);
+      on('[data-respond]', 'click', function (e) { after(api('group.respond', { membershipId: e.currentTarget.getAttribute('data-respond'), accept: e.currentTarget.getAttribute('data-ok') === '1' })); }, panel);
+      on('[data-decide]', 'click', function (e) { after(api('group.decideRequest', { membershipId: e.currentTarget.getAttribute('data-decide'), approve: e.currentTarget.getAttribute('data-ok') === '1' })); }, panel);
+      on('[data-join]', 'click', function (e) { after(api('group.requestJoin', { assessmentId: assessmentId, groupId: e.currentTarget.getAttribute('data-join') })); }, panel);
+    }).catch(function (err) { panel.innerHTML = errBox(err); });
+  }
+
+  views.studentFolder = function (p) {
+    var action = p.studentId ? 'files.studentFolder' : 'student.folder';
+    return api(action, { offeringId: p.offeringId, studentId: p.studentId }).then(function (f) {
+      h(backBtn() + '<div class="breadcrumb">' + f.path.map(esc).join(' / ') + '</div><h1>📁 แฟ้มงาน</h1>' +
+        f.items.map(function (it) {
+          return '<div class="card"><h3 style="margin-top:0">' + esc(it.code) + ' ' + esc(it.title) + ' <span class="small muted">' + KIND[it.kind] + '</span></h3>' +
+            (it.versions.length ? it.versions.map(function (v) {
+              return '<div><strong>รุ่นที่ ' + v.versionNo + '</strong>' + (v.groupName ? ' · กลุ่ม ' + esc(v.groupName) : '') + ' <span class="small muted">' + fmtDate(v.submittedAt) + ' · ' + esc(v.receiptCode) + '</span>' + fileRows(v.files) + '</div>';
+            }).join('') : '<div class="muted small">ยังไม่มีการส่ง</div>') + '</div>';
+        }).join(''));
+      bindBack(); bindFileButtons($main);
+    });
+  };
+
+  // ---------- เปิด/ดาวน์โหลดไฟล์ ----------
+  function bindFileButtons(root) {
+    on('[data-open]', 'click', function (e) { openFile(e.currentTarget.getAttribute('data-open'), e.currentTarget); }, root);
+  }
+  function openFile(fileAssetId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'กำลังเปิด…'; }
+    api('files.open', { fileAssetId: fileAssetId }).then(function (m) {
+      var parts = [];
+      var i = 0;
+      function next() {
+        if (i >= m.chunks) return Promise.resolve();
+        return api('files.chunk', { ticket: m.ticket, index: i }, { retry: 3 }).then(function (c) {
+          var bin = atob(c.data); var arr = new Uint8Array(bin.length);
+          for (var k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+          parts.push(arr); i++;
+          if (btn) btn.textContent = 'กำลังเปิด… ' + Math.round(i / m.chunks * 100) + '%';
+          return next();
+        });
+      }
+      return next().then(function () {
+        var blob = new Blob(parts, { type: m.mime });
+        var url = URL.createObjectURL(blob);
+        var body = '<h2 id="modal-title" style="margin-top:0" class="file-name">' + esc(m.name) + '</h2>';
+        if (m.preview === 'image') body += '<img class="preview-img" src="' + url + '" alt="' + esc(m.name) + '">';
+        else if (m.preview === 'pdf') body += '<iframe class="preview-frame" src="' + url + '" title="' + esc(m.name) + '"></iframe>';
+        else if (m.mime === 'text/plain' && m.size < 1048576) body += '<pre class="text-preview" id="text-preview"></pre>';
+        else body += '<p class="muted">ไฟล์ชนิดนี้เปิดดูในหน้าเว็บไม่ได้ กรุณาดาวน์โหลด</p>';
+        body += '<p><a class="btn" href="' + url + '" download="' + esc(m.name) + '">ดาวน์โหลด</a> <button class="btn ghost" data-close>ปิด</button></p>';
+        openModal(body, function () { URL.revokeObjectURL(url); });
+        if (q('#text-preview')) blob.text().then(function (t) { q('#text-preview').textContent = t; });
+      });
+    }).catch(function (err) { toast(err.message); }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = 'เปิดดู'; }
+    });
+  }
+
+  var modalCleanup = null;
+  function openModal(html, cleanup) {
+    var d = document.getElementById('modal');
+    q('#modal-body').innerHTML = html;
+    modalCleanup = cleanup || null;
+    on('[data-close]', 'click', function () { d.close(); }, d);
+    if (!d.open) d.showModal();
+  }
+  document.getElementById('modal').addEventListener('close', function () {
+    if (modalCleanup) { modalCleanup(); modalCleanup = null; }
+    q('#modal-body').innerHTML = '';
+  });
+
+  // ======================= ครู =======================
+  views.teacherHome = function () {
+    return api('teacher.offerings').then(function (list) {
+      h('<h1>รายวิชาที่สอน</h1>' + (list.length ? '<div class="grid">' + list.map(function (o) {
+        return '<div class="card clickable" data-off="' + esc(o.offeringId) + '" tabindex="0" role="button"><div class="small muted">ปี ' + esc(o.yearBe) + ' ภาค ' + esc(o.termNo) + (o.isOwner ? ' · ครูเจ้าของรายวิชา' : ' · ครูร่วมสอน') + '</div>' +
+          '<h3>' + esc(o.courseCode) + ' ' + esc(o.courseName) + '</h3><div class="small">กลุ่มเรียน ' + esc(o.section) + ' · นักเรียน ' + o.students + ' คน</div></div>';
+      }).join('') + '</div>' : '<div class="card empty">ยังไม่มีรายวิชาที่ได้รับมอบหมาย</div>'));
+      qa('[data-off]').forEach(function (el) {
+        var open = function () { go('teacherOffering', { offeringId: el.getAttribute('data-off') }); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
+      });
+    });
+  };
+
+  views.teacherOffering = function (p) {
+    return api('teacher.assessments', { offeringId: p.offeringId }).then(function (d) {
+      var path = d.offering.path;
+      h(backBtn() + '<div class="breadcrumb">ปี ' + esc(path.yearBe) + ' / ภาคเรียนที่ ' + esc(path.termNo) + '</div><h1>' + esc(path.offering) + '</h1>' +
+        (d.perms.can_manage ? '<p><button class="btn" id="btn-new">+ สร้างภาระงาน</button></p>' : '') +
+        '<div class="card table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่องาน</th><th class="hide-sm">ประเภท</th><th>กำหนดส่ง</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
+        (d.items.length ? d.items.map(function (a) {
+          return '<tr><td>' + esc(a.code) + '</td><td>' + esc(a.title) + '<div class="small muted">เต็ม ' + esc(a.maxScore) + ' · น้ำหนัก ' + esc(a.weight || 0) + '</div></td><td class="hide-sm">' + KIND[a.kind] + '</td>' +
+            '<td>' + fmtDate(a.dueAt) + '</td><td>' + (a.status === 'published' ? '<span class="chip ok">เผยแพร่</span>' : '<span class="chip neutral">ฉบับร่าง</span>') + '</td><td>' +
+            (a.submissionMode !== 'none' ? '<button class="btn small" data-queue="' + a.id + '">ตรวจงาน</button> ' : '') +
+            (a.kind === 'group' ? '<button class="btn ghost small" data-groups="' + a.id + '">กลุ่ม</button> ' : '') +
+            (d.perms.can_manage ? '<button class="btn ghost small" data-edit="' + a.id + '">แก้ไข</button>' : '') + '</td></tr>';
+        }).join('') : '<tr><td colspan="6" class="empty">ยังไม่มีภาระงาน</td></tr>') + '</tbody></table></div>');
+      bindBack();
+      on('#btn-new', 'click', function () { go('assessmentForm', { offeringId: p.offeringId, data: d }); });
+      on('[data-edit]', 'click', function (e) {
+        var id = e.currentTarget.getAttribute('data-edit');
+        go('assessmentForm', { offeringId: p.offeringId, data: d, item: d.items.filter(function (x) { return x.id === id; })[0] });
+      });
+      on('[data-queue]', 'click', function (e) { go('teacherQueue', { assessmentId: e.currentTarget.getAttribute('data-queue'), offeringId: p.offeringId }); });
+      on('[data-groups]', 'click', function (e) { go('teacherGroups', { assessmentId: e.currentTarget.getAttribute('data-groups') }); });
+    });
+  };
+
+  views.assessmentForm = function (p) {
+    var a = p.item || { kind: 'individual', countsTowardGrade: true, status: 'draft' };
+    var lim = p.data.schoolLimits;
+    var types = a.allowedTypes ? a.allowedTypes.split(',') : [];
+    h(backBtn() + '<h1>' + (p.item ? 'แก้ไขภาระงาน' : 'สร้างภาระงาน') + '</h1><form id="af" class="card" novalidate>' +
+      '<div class="row"><div><label for="f-code">รหัสงาน</label><input id="f-code" type="text" maxlength="30" value="' + esc(a.code || '') + '"></div>' +
+      '<div><label for="f-kind">ประเภท</label><select id="f-kind">' + Object.keys(KIND).map(function (k) { return '<option value="' + k + '"' + (a.kind === k ? ' selected' : '') + '>' + KIND[k] + '</option>'; }).join('') + '</select></div></div>' +
+      '<label for="f-title">ชื่องาน</label><input id="f-title" type="text" maxlength="200" value="' + esc(a.title || '') + '">' +
+      '<label for="f-desc">คำชี้แจง</label><textarea id="f-desc">' + esc(a.description || '') + '</textarea>' +
+      '<div class="row"><div><label for="f-max">คะแนนเต็ม</label><input id="f-max" type="number" min="0" step="any" value="' + esc(a.maxScore || '') + '"></div>' +
+      '<div><label for="f-weight">น้ำหนักในรายวิชา</label><input id="f-weight" type="number" min="0" step="any" value="' + esc(a.weight || '') + '"></div></div>' +
+      '<label class="check"><input id="f-counts" type="checkbox"' + (a.countsTowardGrade !== false ? ' checked' : '') + '> นับคะแนน (ยกเลิกเครื่องหมายสำหรับงานฝึกที่ไม่นับผล)</label>' +
+      '<p class="small muted">คะแนนเต็มกับน้ำหนักเป็นคนละค่า เช่น งานเต็ม 20 คะแนน อาจคิดเป็น 10 จาก 100 ของรายวิชา</p>' +
+      '<div id="sub-fields"><div class="row"><div><label for="f-open">เปิดรับ</label><input id="f-open" type="datetime-local" value="' + isoToLocalInput(a.openAt) + '"></div>' +
+      '<div><label for="f-due">กำหนดส่ง</label><input id="f-due" type="datetime-local" value="' + isoToLocalInput(a.dueAt) + '"></div>' +
+      '<div><label for="f-close">ปิดรับ</label><input id="f-close" type="datetime-local" value="' + isoToLocalInput(a.closeAt) + '"></div></div>' +
+      '<label class="check"><input id="f-late" type="checkbox"' + (a.allowLate ? ' checked' : '') + '> รับงานหลังกำหนดส่งจนถึงวันปิดรับ (บันทึกว่าส่งช้า)</label>' +
+      '<label>ชนิดไฟล์ที่รับ (ไม่เลือก = ตามที่โรงเรียนอนุญาต)</label><div class="row">' + lim.allowedTypes.map(function (t) {
+        return '<label class="check" style="flex:0 0 auto"><input type="checkbox" name="f-type" value="' + t + '"' + (types.indexOf(t) >= 0 ? ' checked' : '') + '> ' + t + '</label>';
+      }).join('') + '</div>' +
+      '<div class="row"><div><label for="f-files">จำนวนไฟล์ต่อการส่ง (สูงสุด ' + lim.maxFiles + ')</label><input id="f-files" type="number" min="1" max="' + lim.maxFiles + '" value="' + esc(a.maxFiles || '') + '"></div>' +
+      '<div><label for="f-mb">ขนาดต่อไฟล์ MB (สูงสุด ' + lim.maxFileMb + ')</label><input id="f-mb" type="number" min="1" max="' + lim.maxFileMb + '" value="' + esc(a.maxFileMb || '') + '"></div>' +
+      '<div><label for="f-att">จำนวนครั้งที่ส่งได้ (0 = ไม่จำกัด)</label><input id="f-att" type="number" min="0" value="' + esc(a.maxAttempts || 0) + '"></div></div>' +
+      '<label class="check"><input id="f-links" type="checkbox"' + (a.allowLinks ? ' checked' : '') + '> อนุญาตให้แนบลิงก์</label></div>' +
+      '<div id="group-fields"><h3>การจัดกลุ่ม</h3><div class="row"><div><label for="f-min">สมาชิกต่ำสุด</label><input id="f-min" type="number" min="1" value="' + esc(a.group ? a.group.minSize : 2) + '"></div>' +
+      '<div><label for="f-maxs">สมาชิกสูงสุด</label><input id="f-maxs" type="number" min="1" value="' + esc(a.group ? a.group.maxSize : 3) + '"></div>' +
+      '<div><label for="f-gclose">ปิดจัดกลุ่ม</label><input id="f-gclose" type="datetime-local" value="' + isoToLocalInput(a.group && a.group.formationCloseAt) + '"></div></div>' +
+      '<label class="check"><input id="f-appr" type="checkbox"' + (a.group && a.group.requireApproval ? ' checked' : '') + '> ครูต้องอนุมัติกลุ่ม</label>' +
+      '<label class="check"><input id="f-leader" type="checkbox"' + (a.groupSubmitPolicy === 'leader_only' ? ' checked' : '') + '> ให้หัวหน้ากลุ่มส่งเท่านั้น (ค่าเริ่มต้น: สมาชิกคนใดก็ส่งแทนกลุ่มได้)</label></div>' +
+      '<label for="f-status">สถานะ</label><select id="f-status"><option value="draft">ฉบับร่าง (นักเรียนยังไม่เห็น)</option><option value="published"' + (a.status === 'published' ? ' selected' : '') + '>เผยแพร่</option></select>' +
+      '<div id="af-msg"></div><p><button class="btn" type="submit">บันทึก</button></p></form>');
+    bindBack();
+    function toggle() {
+      var k = q('#f-kind').value;
+      q('#sub-fields').hidden = k === 'exam' || k === 'score_only';
+      q('#group-fields').hidden = k !== 'group';
+    }
+    q('#f-kind').addEventListener('change', toggle); toggle();
+    q('#af').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var btn = q('#af button[type=submit]'); btn.disabled = true;
+      var payload = {
+        offeringId: p.offeringId, id: p.item ? p.item.id : undefined, version: p.item ? p.item.version : undefined,
+        code: q('#f-code').value, title: q('#f-title').value, description: q('#f-desc').value, kind: q('#f-kind').value,
+        maxScore: q('#f-max').value, weight: q('#f-weight').value, countsTowardGrade: q('#f-counts').checked,
+        openAt: localInputToIso(q('#f-open').value), dueAt: localInputToIso(q('#f-due').value), closeAt: localInputToIso(q('#f-close').value),
+        allowLate: q('#f-late').checked, allowedTypes: qa('[name=f-type]:checked').map(function (x) { return x.value; }).join(','),
+        maxFiles: q('#f-files').value, maxFileMb: q('#f-mb').value, maxAttempts: q('#f-att').value || 0, allowLinks: q('#f-links').checked,
+        groupSubmitPolicy: q('#f-leader').checked ? 'leader_only' : 'any_member', status: q('#f-status').value,
+        group: { minSize: q('#f-min').value, maxSize: q('#f-maxs').value, formationCloseAt: localInputToIso(q('#f-gclose').value), requireApproval: q('#f-appr').checked }
+      };
+      api('teacher.saveAssessment', payload).then(function () { toast('บันทึกแล้ว'); back(); }).catch(function (err) {
+        q('#af-msg').innerHTML = errBox(err); btn.disabled = false;
+      });
+    });
+  };
+
+  views.teacherQueue = function (p) {
+    return api('teacher.submissions', { assessmentId: p.assessmentId }).then(function (d) {
+      var c = d.counts;
+      h(backBtn() + '<div class="breadcrumb">' + KIND[d.assessment.kind] + ' · กำหนดส่ง ' + fmtDate(d.assessment.dueAt) + '</div><h1>' + esc(d.assessment.code) + ' ' + esc(d.assessment.title) + '</h1>' +
+        '<p><span class="chip ok">✓ ส่งแล้ว ' + c.submitted + '</span> <span class="chip warn">⏰ ส่งช้า ' + c.late + '</span> <span class="chip ' + (c.pastDue ? 'bad' : 'neutral') + '">ยังไม่ส่ง ' + c.notSubmitted + '</span> ' +
+        '<span class="small muted">จาก ' + c.owners + (d.assessment.kind === 'group' ? ' กลุ่ม' : ' คน') + '</span></p>' +
+        '<label for="flt">กรองสถานะ</label><select id="flt"><option value="">ทั้งหมด</option><option value="pending">รอตรวจ</option><option value="late">ส่งช้า</option><option value="none">ยังไม่ส่ง</option></select>' +
+        '<div class="card table-wrap"><table><thead><tr><th>' + (d.assessment.kind === 'group' ? 'กลุ่ม' : 'นักเรียน') + '</th><th>สถานะ</th><th class="hide-sm">รุ่น</th><th>ส่งล่าสุด</th><th></th></tr></thead><tbody id="qrows"></tbody></table></div>');
+      bindBack();
+      function draw() {
+        var f = q('#flt').value;
+        var rows = d.rows.filter(function (r) {
+          if (f === 'pending') return ['submitted', 'late', 'resubmitted'].indexOf(r.status) >= 0;
+          if (f === 'late') return r.isLate;
+          if (f === 'none') return !r.versionNo;
+          return true;
+        });
+        q('#qrows').innerHTML = rows.map(function (r) {
+          return '<tr><td>' + (r.studentCode ? esc(r.studentCode) + ' ' : '') + esc(r.name) +
+            (r.members ? '<div class="small muted">' + r.members.map(function (m) { return esc(m.name); }).join(', ') + '</div>' : '') +
+            (r.enrollmentStatus && r.enrollmentStatus !== 'active' ? ' <span class="chip neutral">ถอน/ย้าย</span>' : '') + '</td>' +
+            '<td>' + chip(r.status, r.statusLabel) + '</td><td class="hide-sm">' + (r.versionNo || '—') + '</td><td>' + (r.lastSubmittedAt ? fmtDate(r.lastSubmittedAt) : '—') + '</td>' +
+            '<td>' + (r.submissionId && r.versionNo ? '<button class="btn small" data-sub="' + r.submissionId + '">เปิด</button> ' : '') +
+            (r.ownerType === 'student' ? '<button class="btn ghost small" data-folder="' + r.ownerId + '" aria-label="แฟ้มงานของ ' + esc(r.name) + '">แฟ้ม</button>' : '') + '</td></tr>';
+        }).join('') || '<tr><td colspan="5" class="empty">ไม่มีรายการ</td></tr>';
+        on('[data-sub]', 'click', function (e) { go('submissionDetail', { submissionId: e.currentTarget.getAttribute('data-sub') }); }, q('#qrows'));
+        on('[data-folder]', 'click', function (e) { go('studentFolder', { offeringId: p.offeringId, studentId: e.currentTarget.getAttribute('data-folder') }); }, q('#qrows'));
+      }
+      q('#flt').addEventListener('change', draw); draw();
+    });
+  };
+
+  views.submissionDetail = function (p) {
+    return api('submission.detail', { submissionId: p.submissionId }).then(function (d) {
+      var latest = d.versions[0];
+      h(backBtn() + '<div class="breadcrumb">' + esc(d.assessment.code) + ' ' + esc(d.assessment.title) + ' · เต็ม ' + esc(d.assessment.maxScore) + ' · น้ำหนัก ' + esc(d.assessment.weight || 0) + '</div>' +
+        '<h1>' + (d.owner.studentCode ? esc(d.owner.studentCode) + ' ' : '') + esc(d.owner.name) + '</h1>' +
+        (d.owner.members ? '<p class="small">สมาชิกปัจจุบัน: ' + d.owner.members.map(function (m) { return esc(m.name); }).join(', ') + '</p>' : '') +
+        '<p>' + chip(d.status, d.statusLabel) + '</p>' +
+        (d.canReview && latest ? '<div class="card"><h3 style="margin-top:0">ตรวจรุ่นที่ ' + latest.versionNo + '</h3>' +
+          '<label for="rnote">ข้อความถึงนักเรียน (จำเป็นเมื่อส่งคืนแก้ไข)</label><textarea id="rnote"></textarea>' +
+          '<div id="rmsg"></div><p><button class="btn" id="btn-accept">รับรุ่นนี้เพื่อประเมิน</button> <button class="btn ghost" id="btn-return">ส่งคืนแก้ไข</button></p>' +
+          '<p class="small muted">การให้คะแนนและประกาศคะแนนจะอยู่ในสมุดคะแนน (ระยะถัดไป)</p></div>' : '') +
+        '<h2>รุ่นที่ส่ง</h2>' + versionsHtml(d.versions, true));
+      bindBack(); bindFileButtons($main);
+      function review(action) {
+        api('teacher.review', { versionId: latest.id, action: action, note: q('#rnote').value, expectedVersion: d.version }).then(function () {
+          toast(action === 'accept' ? 'รับรุ่นนี้แล้ว' : 'ส่งคืนแก้ไขแล้ว'); render();
+        }).catch(function (err) { q('#rmsg').innerHTML = errBox(err); });
+      }
+      on('#btn-accept', 'click', function () { review('accept'); });
+      on('#btn-return', 'click', function () { review('return'); });
+    });
+  };
+
+  views.teacherGroups = function (p) {
+    return api('teacher.groups', { assessmentId: p.assessmentId }).then(function (d) {
+      var s = d.settings;
+      var groupOpts = d.groups.map(function (g) { return '<option value="' + g.id + '">' + esc(g.name) + ' (' + g.count + ')</option>'; }).join('');
+      h(backBtn() + '<h1>การจัดกลุ่ม</h1><p class="small muted">สมาชิก ' + s.minSize + '–' + s.maxSize + ' คน' + (s.formationCloseAt ? ' · ปิดจัดกลุ่ม ' + fmtDate(s.formationCloseAt) : '') + '</p>' +
+        (d.incomplete.length ? '<div class="notice warn">กลุ่มที่จำนวนสมาชิกไม่ตรงเงื่อนไข: ' + d.incomplete.map(function (x) { return esc(x.name) + ' (' + x.count + ' คน)'; }).join(', ') + '</div>' : '') +
+        (d.ungrouped.length ? '<div class="notice warn">นักเรียนที่ยังไม่มีกลุ่ม ' + d.ungrouped.length + ' คน</div>' : '') +
+        '<div class="grid">' + d.groups.map(function (g) {
+          return '<div class="card"><h3 style="margin-top:0">' + esc(g.name) + '</h3><p>' + chip(g.frozen ? 'accepted' : 'draft', g.statusLabel) + (g.sizeOk ? '' : ' <span class="chip bad">จำนวนไม่ตรง</span>') + (g.sizeException ? ' <span class="chip info">ข้อยกเว้น</span>' : '') + '</p><ul>' +
+            g.members.map(function (m) { return '<li>' + esc(m.studentCode) + ' ' + esc(m.name) + (m.isLeader ? ' (หัวหน้า)' : '') + ' <button class="btn ghost small" data-move="' + m.studentId + '">ย้าย</button></li>'; }).join('') + '</ul>' +
+            (g.status === 'pending_approval' ? '<button class="btn small" data-approve="' + g.id + '">อนุมัติกลุ่ม</button> ' : '') +
+            (!g.sizeOk ? '<button class="btn ghost small" data-exc="' + g.id + '" data-ver="' + g.version + '">อนุมัติข้อยกเว้นจำนวน</button>' : '') + '</div>';
+        }).join('') + '</div>' +
+        '<div class="card"><h2 style="margin-top:0">จัดนักเรียนเข้ากลุ่ม</h2><label for="mv-st">นักเรียน</label><select id="mv-st">' +
+        d.ungrouped.map(function (u) { return '<option value="' + u.studentId + '">' + esc(u.studentCode) + ' ' + esc(u.name) + ' (ยังไม่มีกลุ่ม)</option>'; }).join('') +
+        d.groups.map(function (g) { return g.members.map(function (m) { return '<option value="' + m.studentId + '">' + esc(m.studentCode) + ' ' + esc(m.name) + ' (' + esc(g.name) + ')</option>'; }).join(''); }).join('') +
+        '</select><label for="mv-to">ไปกลุ่ม</label><select id="mv-to">' + groupOpts + '<option value="">+ กลุ่มใหม่</option></select>' +
+        '<label for="mv-name">ชื่อกลุ่มใหม่ (ถ้าเลือกกลุ่มใหม่)</label><input id="mv-name" type="text">' +
+        '<label for="mv-reason">เหตุผล (จำเป็นเมื่อกลุ่มถูกตรึงแล้วหรือเกินจำนวน)</label><input id="mv-reason" type="text">' +
+        '<div id="mv-msg"></div><p><button class="btn" id="btn-move">ตรวจผลกระทบและบันทึก</button></p></div>');
+      bindBack();
+      on('[data-move]', 'click', function (e) { q('#mv-st').value = e.currentTarget.getAttribute('data-move'); q('#mv-st').focus(); });
+      on('[data-approve]', 'click', function (e) {
+        api('teacher.groupApprove', { groupId: e.currentTarget.getAttribute('data-approve') }).then(function () { toast('อนุมัติแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+      on('[data-exc]', 'click', function (e) {
+        var reason = prompt('เหตุผลของข้อยกเว้นจำนวนสมาชิก');
+        if (!reason) return;
+        api('teacher.groupApprove', { groupId: e.currentTarget.getAttribute('data-exc'), sizeException: true, reason: reason, expectedVersion: Number(e.currentTarget.getAttribute('data-ver')) })
+          .then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+      on('#btn-move', 'click', function () {
+        var payload = { assessmentId: p.assessmentId, studentId: q('#mv-st').value, groupId: q('#mv-to').value || undefined, newGroupName: q('#mv-name').value, reason: q('#mv-reason').value };
+        api('teacher.groupAssign', payload).then(function (r) {
+          if (!r.needsConfirm) { toast('บันทึกแล้ว'); render(); return; }
+          var text = 'การเปลี่ยนนี้มีผลกระทบ:\n' + r.impact.map(function (x) { return '- ' + x.groupName + ': ส่งแล้ว ' + x.submittedVersions + ' รุ่น' + (x.hasGroupGrade ? ' มีคะแนนกลุ่มแล้ว' : '') + '\n  ' + x.note; }).join('\n') +
+            (r.overMax ? '\n- กลุ่มปลายทางจะเกินจำนวนสูงสุด (บันทึกเป็นข้อยกเว้น)' : '') + '\n\nยืนยันหรือไม่?';
+          if (!confirm(text)) return;
+          payload.confirm = true;
+          return api('teacher.groupAssign', payload).then(function () { toast('บันทึกแล้ว'); render(); });
+        }).catch(function (err) { q('#mv-msg').innerHTML = errBox(err); });
+      });
+    });
+  };
+
+  // ======================= ผู้ดูแล =======================
+  views.adminHome = function () {
+    return api('admin.status').then(function (s) {
+      var pct = s.drive.limit ? (s.drive.used / s.drive.limit * 100) : 0;
+      var st = s.settings;
+      var allTypes = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'gif', 'docx', 'xlsx', 'pptx', 'txt', 'csv', 'odt', 'ods', 'odp', 'zip', 'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'sb3'];
+      function files(k) { var x = s.files[k] || { count: 0, bytes: 0 }; return x.count + ' ไฟล์ (' + fmtBytes(x.bytes) + ')'; }
+      h('<h1>ผู้ดูแลระบบ</h1>' +
+        (s.pendingTx ? '<div class="notice bad">มีธุรกรรมค้างรอกู้คืน ระบบจะกู้คืนอัตโนมัติเมื่อมีการบันทึกครั้งถัดไป</div>' : '') +
+        (!s.triggers.length ? '<div class="notice warn">ยังไม่ได้ติดตั้งงานตั้งเวลา (สำรองข้อมูล/ล้างไฟล์) ให้รัน installTriggers ใน Apps Script editor</div>' : '') +
+        '<div class="grid"><div class="card"><h3 style="margin-top:0">พื้นที่ Google Drive ของบัญชีระบบ</h3><p>' + fmtBytes(s.drive.used) + ' / ' + (s.drive.limit ? fmtBytes(s.drive.limit) : 'ไม่จำกัด') + ' (' + pct.toFixed(1) + '%)</p>' +
+        '<div class="progress" role="progressbar" aria-valuenow="' + Math.round(pct) + '" aria-valuemin="0" aria-valuemax="100" aria-label="พื้นที่ที่ใช้"><div style="width:' + Math.min(100, pct) + '%"></div></div>' +
+        '<p class="small">ไฟล์ของระบบ: ' + fmtBytes(s.appUsageBytes) + (st.quota_total_mb ? ' / โควตา ' + st.quota_total_mb + ' MB' : '') + '</p></div>' +
+        '<div class="card"><h3 style="margin-top:0">ไฟล์</h3><dl class="kv"><dt>ส่งแล้ว</dt><dd>' + files('stored') + '</dd><dt>ฉบับร่าง</dt><dd>' + files('staging') + '</dd><dt>ถูกกัก</dt><dd>' + files('quarantined') + '</dd></dl></div>' +
+        '<div class="card"><h3 style="margin-top:0">ข้อมูล</h3><dl class="kv"><dt>นักเรียน</dt><dd>' + s.counts.students + '</dd><dt>ครู</dt><dd>' + s.counts.teachers + '</dd><dt>รายวิชาที่เปิดสอน</dt><dd>' + s.counts.offerings + '</dd>' +
+        '<dt>สภาพแวดล้อม</dt><dd>' + esc(s.env) + '</dd><dt>รุ่นโครงสร้าง</dt><dd>' + s.setup.schemaVersion + '</dd></dl></div></div>' +
+        '<form class="card" id="sf"><h2 style="margin-top:0">ค่าตั้งการส่งงานและไฟล์</h2>' +
+        '<div class="row"><div><label for="s-mb">ขนาดไฟล์สูงสุด (MB)</label><input id="s-mb" type="number" min="1" value="' + st.max_file_mb + '"></div>' +
+        '<div><label for="s-n">จำนวนไฟล์ต่อการส่ง</label><input id="s-n" type="number" min="1" value="' + st.max_files_per_submission + '"></div>' +
+        '<div><label for="s-q">โควตารวม MB (0 = ไม่ตั้ง)</label><input id="s-q" type="number" min="0" value="' + st.quota_total_mb + '"></div></div>' +
+        '<div class="row"><div><label for="s-st">เก็บไฟล์ที่ยังไม่ส่ง (ชั่วโมง)</label><input id="s-st" type="number" min="1" value="' + st.staging_retention_hours + '"></div>' +
+        '<div><label for="s-qd">เก็บไฟล์ที่ถูกกัก (วัน)</label><input id="s-qd" type="number" min="1" value="' + st.quarantine_retention_days + '"></div>' +
+        '<div><label for="s-bk">เก็บชุดสำรอง (วัน)</label><input id="s-bk" type="number" min="1" value="' + st.backup_retention_days + '"></div></div>' +
+        '<label>ชนิดไฟล์ที่โรงเรียนอนุญาต</label><div class="row">' + allTypes.map(function (t) {
+          return '<label class="check" style="flex:0 0 auto"><input type="checkbox" name="s-type" value="' + t + '"' + (st.allowed_file_types.indexOf(t) >= 0 ? ' checked' : '') + '> ' + t + '</label>';
+        }).join('') + '</div><p class="small muted">ไฟล์โค้ด/HTML เก็บเป็นเอกสารดาวน์โหลดเท่านั้น ไม่ถูกเปิดหรือรันในระบบ</p>' +
+        '<div id="sf-msg"></div><p><button class="btn" type="submit">บันทึกค่าตั้ง</button></p></form>');
+      q('#sf').addEventListener('submit', function (e) {
+        e.preventDefault();
+        api('admin.updateSettings', { changes: {
+          max_file_mb: Number(q('#s-mb').value), max_files_per_submission: Number(q('#s-n').value), quota_total_mb: Number(q('#s-q').value),
+          staging_retention_hours: Number(q('#s-st').value), quarantine_retention_days: Number(q('#s-qd').value), backup_retention_days: Number(q('#s-bk').value),
+          allowed_file_types: qa('[name=s-type]:checked').map(function (x) { return x.value; })
+        } }).then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#sf-msg').innerHTML = errBox(err); });
+      });
+    });
+  };
+
+  // ======================= เริ่มต้น =======================
+  document.getElementById('btn-home').addEventListener('click', home);
+  document.getElementById('btn-logout').addEventListener('click', logout);
+  document.getElementById('btn-notify').addEventListener('click', function () { go('notifications'); });
+  document.getElementById('role-switch').addEventListener('change', function (e) { state.role = e.target.value; store.set('cwk_role', state.role); home(); });
+
+  state.token = store.get('cwk_token');
+  if (state.token) {
+    loadMe().then(home).catch(function () { signOutLocal(); });
+  } else {
+    state.stack = [{ name: 'login' }];
+    render();
+  }
+})();
+</script>

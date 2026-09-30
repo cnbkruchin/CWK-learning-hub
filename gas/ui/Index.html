@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <?!= include('ui/Styles'); ?>
+</head>
+<body>
+  <a class="skip" href="#main">ข้ามไปเนื้อหา</a>
+  <header class="topbar" id="topbar" hidden>
+    <button class="icon-btn" id="btn-home" aria-label="หน้าหลัก">⌂</button>
+    <div class="brand"><span id="app-name">CWK Learning Hub</span><small id="school-name"></small></div>
+    <div class="top-actions">
+      <select id="role-switch" aria-label="เลือกบทบาท" hidden></select>
+      <button class="icon-btn" id="btn-notify" aria-label="แจ้งเตือน">🔔<span class="badge" id="notify-count" hidden></span></button>
+      <button class="btn ghost small" id="btn-logout">ออกจากระบบ</button>
+    </div>
+  </header>
+  <div class="demo-banner" id="demo-banner" hidden>ระบบสาธิต — ข้อมูลทั้งหมดเป็นข้อมูลสมมติ</div>
+  <main id="main" tabindex="-1">
+    <div class="loading">กำลังโหลด…</div>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="modal" aria-labelledby="modal-title">
+    <div class="modal-body" id="modal-body"></div>
+  </dialog>
+  <?!= include('ui/App'); ?>
+</body>
+</html>
