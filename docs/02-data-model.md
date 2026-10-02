@@ -80,7 +80,7 @@ erDiagram
 
 ## ไฟล์ `CWK_DB_core (บัญชี รายวิชา ทะเบียน)`
 
-ตาราง: `schools` `settings` `users` `role_assignments` `teachers` `students` `academic_years` `terms` `courses` `course_offerings` `teaching_assignments` `enrollments` `enrollment_history`
+ตาราง: `schools` `settings` `users` `role_assignments` `teachers` `students` `registration_requests` `academic_years` `terms` `courses` `course_offerings` `teaching_assignments` `enrollments` `enrollment_history`
 
 ### `schools`
 
@@ -190,6 +190,29 @@ erDiagram
 | `roll_no` | จำนวนเต็ม |  | เลขที่ |
 | `status` | ตัวเลือก: `active` `graduated` `transferred` `withdrawn` `inactive` |  |  (ค่าเริ่มต้น `active`) |
 
+### `registration_requests`
+
+คำขอลงทะเบียนใช้งานของนักเรียน (สมัครเอง) รอผู้ดูแลอนุมัติก่อนสร้างบัญชี
+
+- ประเภท: small
+
+| คอลัมน์ | ชนิด | จำเป็น | คำอธิบาย |
+| --- | --- | --- | --- |
+| `school_id` | อ้างอิง → `schools` | ✓ |  |
+| `student_code` | รหัส (ข้อความ) | ✓ |  |
+| `prefix` | ข้อความ |  |  |
+| `first_name` | ข้อความ | ✓ |  |
+| `last_name` | ข้อความ |  |  |
+| `class_level` | ข้อความ |  |  |
+| `room` | ข้อความ |  |  |
+| `roll_no` | จำนวนเต็ม |  |  |
+| `password_hash` | ข้อความ |  | รหัสผ่านที่นักเรียนตั้ง (hash) ย้ายไปบัญชีเมื่ออนุมัติ **ข้อมูลลับ** |
+| `status` | ตัวเลือก: `pending` `approved` `rejected` |  |  (ค่าเริ่มต้น `pending`) |
+| `student_id` | อ้างอิง → `students` |  | ทะเบียนนักเรียนที่สร้าง/ผูกเมื่ออนุมัติ |
+| `decided_by` | อ้างอิง → `users` |  |  |
+| `decided_at` | วันเวลา ISO UTC |  |  |
+| `reason` | ข้อความ |  |  |
+
 ### `academic_years`
 
 ปีการศึกษา (พ.ศ.)
@@ -265,6 +288,11 @@ erDiagram
 | `quota_mb` | จำนวนเต็ม |  | โควตาไฟล์ของรายวิชา (0 = ใช้ของโรงเรียน) |
 | `closed_at` | วันเวลา ISO UTC |  |  |
 | `closed_by` | อ้างอิง → `users` |  |  |
+| `join_code` | รหัส (ข้อความ) |  | รหัสเข้าร่วมรายวิชา ให้นักเรียนลงทะเบียนเรียนเอง (ว่าง = ไม่เปิด) |
+| `join_enabled` | จริง/เท็จ |  | เปิดให้นักเรียนลงทะเบียนเรียนเองด้วยรหัสเข้าร่วม (ค่าเริ่มต้น `false`) |
+| `group_max_size` | จำนวนเต็ม |  | จำนวนสมาชิกสูงสุดของกลุ่มประจำรายวิชา (0 = ไม่จำกัด) (ค่าเริ่มต้น `0`) |
+| `leader_direct_add` | จริง/เท็จ |  | หัวหน้ากลุ่มเพิ่มสมาชิกได้ทันที (ค่าเริ่มต้น: ส่งคำเชิญให้สมาชิกตอบรับ) (ค่าเริ่มต้น `false`) |
+| `groups_locked` | จริง/เท็จ |  | ครูล็อกกลุ่มประจำรายวิชา นักเรียนเปลี่ยนสมาชิกไม่ได้ (ค่าเริ่มต้น `false`) |
 
 ### `teaching_assignments`
 
@@ -458,7 +486,7 @@ erDiagram
 
 ## ไฟล์ `CWK_DB_work (กลุ่ม การส่งงาน)`
 
-ตาราง: `assignment_group_sets` `groups` `group_memberships` `group_membership_history` `assignment_member_snapshots` `submissions` `submission_versions`
+ตาราง: `assignment_group_sets` `work_groups` `work_group_members` `work_group_history` `groups` `group_memberships` `group_membership_history` `assignment_member_snapshots` `submissions` `submission_versions`
 
 ### `assignment_group_sets`
 
@@ -478,6 +506,54 @@ erDiagram
 | `section_restricted` | จริง/เท็จ |  | สมาชิกต้องอยู่กลุ่มเรียนเดียวกัน (ค่าเริ่มต้น `true`) |
 | `copied_from_set_id` | อ้างอิง → `assignment_group_sets` |  |  |
 | `all_frozen_at` | วันเวลา ISO UTC |  | เวลาที่ตรึงทุกกลุ่มเมื่อถึงวันปิดจัดกลุ่ม |
+| `source` | ตัวเลือก: `self` `work_groups` |  | self = จัดกลุ่มเฉพาะงานนี้, work_groups = ใช้กลุ่มประจำรายวิชา (กลุ่มเดิมทำได้หลายงาน) (ค่าเริ่มต้น `self`) |
+
+### `work_groups`
+
+กลุ่มประจำรายวิชา (กลุ่มเดิมทำงานกลุ่มได้หลายงาน คะแนนแต่ละงานเก็บที่กลุ่มของงานนั้น)
+
+- ประเภท: large
+- ดัชนีค้นหา: `offering_id`
+
+| คอลัมน์ | ชนิด | จำเป็น | คำอธิบาย |
+| --- | --- | --- | --- |
+| `offering_id` | อ้างอิง → `course_offerings` | ✓ |  |
+| `name` | ข้อความ | ✓ |  |
+| `leader_student_id` | อ้างอิง → `students` |  | หัวหน้ากลุ่ม (เลือกสมาชิกเข้ากลุ่มได้) |
+| `status` | ตัวเลือก: `active` `disbanded` |  |  (ค่าเริ่มต้น `active`) |
+| `active_count` | จำนวนเต็ม |  |  (ค่าเริ่มต้น `0`) |
+| `note` | ข้อความ |  |  |
+
+### `work_group_members`
+
+สมาชิกกลุ่มประจำรายวิชาและคำเชิญ (หนึ่งคน active ได้หนึ่งกลุ่มต่อรายวิชา)
+
+- ประเภท: large
+- ดัชนีค้นหา: `work_group_id`, `offering_id`, `student_id`
+
+| คอลัมน์ | ชนิด | จำเป็น | คำอธิบาย |
+| --- | --- | --- | --- |
+| `work_group_id` | อ้างอิง → `work_groups` | ✓ |  |
+| `offering_id` | อ้างอิง → `course_offerings` | ✓ |  |
+| `student_id` | อ้างอิง → `students` | ✓ |  |
+| `status` | ตัวเลือก: `invited` `active` `declined` `left` `removed` `cancelled` | ✓ |  |
+| `added_by_user_id` | อ้างอิง → `users` |  |  |
+| `responded_at` | วันเวลา ISO UTC |  |  |
+
+### `work_group_history`
+
+ประวัติการเปลี่ยนแปลงกลุ่มประจำรายวิชา
+
+- ประเภท: large, append-only, lock-free
+- ดัชนีค้นหา: `work_group_id`
+
+| คอลัมน์ | ชนิด | จำเป็น | คำอธิบาย |
+| --- | --- | --- | --- |
+| `work_group_id` | อ้างอิง → `work_groups` | ✓ |  |
+| `student_id` | อ้างอิง → `students` |  |  |
+| `action` | ข้อความ | ✓ | create rename invite accept decline add remove leave leader disband |
+| `reason` | ข้อความ |  |  |
+| `detail_json` | JSON |  |  |
 
 ### `groups`
 
@@ -500,6 +576,7 @@ erDiagram
 | `frozen_at` | วันเวลา ISO UTC |  |  |
 | `frozen_reason` | ตัวเลือก: `first_submission` `formation_closed` `teacher` |  |  |
 | `snapshot_no` | จำนวนเต็ม |  | รุ่น snapshot สมาชิกปัจจุบัน (ค่าเริ่มต้น `0`) |
+| `work_group_id` | อ้างอิง → `work_groups` |  | กลุ่มประจำรายวิชาที่เป็นต้นทาง (เมื่องานใช้กลุ่มประจำรายวิชา) |
 
 ### `group_memberships`
 

@@ -57,7 +57,10 @@ var APP = {
     login_max_failures: 5,
     login_lock_minutes: 15,
     backup_retention_days: 30,
-    late_penalty_enabled: false
+    late_penalty_enabled: false,
+    // นักเรียนสมัครใช้งานเอง (ปิดเป็นค่าเริ่มต้น) — คำขอต้องรอผู้ดูแลอนุมัติก่อนสร้างบัญชีเสมอ
+    self_registration_enabled: false,
+    self_registration_code: ''
   },
 
   // เพดานทางเทคนิค
@@ -68,6 +71,10 @@ var APP = {
   LOCK_WAIT_MS: 25000,
   CELL_MAX_CHARS: 45000, // Google Sheets รับได้ 50,000 ตัวอักษรต่อเซลล์
   PBKDF2_ITERATIONS: 60000,
+  // รหัสผ่านชั่วคราวที่ระบบสุ่ม (12 ตัวจาก 32 แบบ ≈ 60 บิต และต้องเปลี่ยนเมื่อเข้าใช้ครั้งแรก) ใช้รอบน้อยลง
+  // เพื่อให้สร้างบัญชีนักเรียนทั้งห้องได้ภายในเวลาจำกัดของ Apps Script; รหัสที่ผู้ใช้ตั้งเองใช้ PBKDF2_ITERATIONS เสมอ
+  TEMP_PASSWORD_ITERATIONS: 2000,
+  IMPORT_MAX_ROWS: 500,
   IDEMPOTENCY_TTL_HOURS: 48,
   JOURNAL_KEEP_DAYS: 7,
 

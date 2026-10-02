@@ -51,7 +51,7 @@ test('A08 สองคนเข้ากลุ่มที่เหลือห�
   assert.equal(call(f.g, 'group.requestJoin', { assessmentId: f.G1, groupId: gid }, f.t('00125')).error.code, 'GROUP_FULL');
   const sets = f.g.Db.find('group_memberships', { status: 'active' });
   const perStudent = {};
-  sets.forEach((m) => { perStudent[m.student_id] = (perStudent[m.student_id] || 0) + 1; });
+  sets.forEach((m) => { const k = m.group_set_id + '|' + m.student_id; perStudent[k] = (perStudent[k] || 0) + 1; });
   assert.ok(Object.values(perStudent).every((n) => n === 1));
 });
 

@@ -1,0 +1,618 @@
+<script>
+/**
+ * หน้าจัดการ: สมัครใช้งาน, รายวิชา/ทะเบียนผู้เรียน, กลุ่มประจำรายวิชา (ครูและนักเรียน), หน้าผู้ดูแล (นักเรียน ครู รายวิชา คำขอลงทะเบียน)
+ * ใช้ตัวช่วยกลางจาก window.CWK (ui/App) — ทุกการตรวจสิทธิ์และเงื่อนไขทำที่เซิร์ฟเวอร์ หน้าเว็บแค่ซ่อนปุ่มที่ไม่มีสิทธิ์
+ */
+(function (C) {
+  'use strict';
+  var views = C.views, api = C.api, h = C.h, q = C.q, qa = C.qa, on = C.on, esc = C.esc, toast = C.toast, errBox = C.errBox;
+  var go = C.go, swap = C.swap, back = C.back, render = C.render, backBtn = C.backBtn, bindBack = C.bindBack, fmtDate = C.fmtDate;
+  var STUDENT_STATUS = { active: 'กำลังศึกษา', graduated: 'จบการศึกษา', transferred: 'ย้ายโรงเรียน', withdrawn: 'ลาออก', inactive: 'ไม่ใช้งาน' };
+  var ENR_STATUS = { active: 'กำลังเรียน', withdrawn: 'ถอนรายวิชา', transferred_out: 'ย้ายออก', completed: 'จบรายวิชา' };
+  var PREFIXES = ['เด็กชาย', 'เด็กหญิง', 'นาย', 'นางสาว', 'นาง'];
+
+  /** ดาวน์โหลดไฟล์จากข้อมูลในหน้า (CSV/XLSX) โดยไม่ผ่านลิงก์สาธารณะ */
+  function download(name, mime, data) {
+    var blob = data instanceof Blob ? data : new Blob([data], { type: mime });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  }
+  /** CSV สำหรับ Excel: UTF-8 BOM + ป้องกันข้อความที่ขึ้นต้นด้วย = + - @ ถูกตีความเป็นสูตร */
+  function csv(rows) {
+    return '﻿' + rows.map(function (r) {
+      return r.map(function (v) {
+        var s = String(v === null || v === undefined ? '' : v);
+        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      }).join(',');
+    }).join('\r\n');
+  }
+  C.download = download;
+  C.csv = csv;
+
+  function offeringHeader(o) {
+    return '<div class="breadcrumb">ปี ' + esc(o.yearBe) + ' / ภาคเรียนที่ ' + esc(o.termNo) + ' · ครู ' + esc(o.ownerName) + '</div>' +
+      '<h1>' + esc(o.courseCode) + ' ' + esc(o.courseName) + ' (' + esc(o.section) + ')</h1>';
+  }
+  C.offeringHeader = offeringHeader;
+
+  function pickList(name, people, opts) {
+    opts = opts || {};
+    if (!people.length) return '<div class="muted small">' + esc(opts.empty || 'ไม่มีรายชื่อ') + '</div>';
+    return '<div class="small"><label class="check" style="margin:0"><input type="checkbox" data-all="' + name + '"> เลือกทั้งหมด (' + people.length + ' คน)</label></div>' +
+      '<div class="pick-list" role="group" aria-label="' + esc(opts.label || 'รายชื่อ') + '">' + people.map(function (s) {
+        return '<label><input type="checkbox" name="' + name + '" value="' + esc(s.id || s.studentId) + '"> ' +
+          (s.code ? '<span class="muted">' + esc(s.code) + '</span> ' : '') + esc(s.name) + ' <span class="small muted">' + esc(s.roomLabel || '') + '</span></label>';
+      }).join('') + '</div>';
+  }
+  function bindPickAll(root) {
+    on('[data-all]', 'change', function (e) {
+      var name = e.currentTarget.getAttribute('data-all');
+      qa('[name="' + name + '"]', root).forEach(function (x) { x.checked = e.currentTarget.checked; });
+    }, root);
+  }
+  function picked(name, root) { return qa('[name="' + name + '"]:checked', root).map(function (x) { return x.value; }); }
+  C.pickList = pickList; C.bindPickAll = bindPickAll; C.picked = picked;
+
+  /** แสดงรหัสผ่านชั่วคราว (ครั้งเดียว) พร้อมดาวน์โหลด/พิมพ์แจกนักเรียน */
+  function showCredentials(list, title) {
+    C.openModal('<h2 id="modal-title" style="margin-top:0">' + esc(title || 'บัญชีที่สร้างใหม่') + '</h2>' +
+      '<div class="notice warn small">รหัสผ่านชั่วคราวแสดงครั้งเดียว ผู้ใช้ต้องเปลี่ยนรหัสผ่านเมื่อเข้าใช้ครั้งแรก กรุณาแจกเป็นรายบุคคลและไม่บันทึกไว้ในที่สาธารณะ</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>ชื่อผู้ใช้</th><th>ชื่อ</th><th>รหัสผ่านชั่วคราว</th></tr></thead><tbody>' +
+      list.map(function (a) { return '<tr><td>' + esc(a.username) + '</td><td>' + esc(a.name || '') + (a.room ? ' <span class="small muted">' + esc(a.room) + '</span>' : '') + '</td><td class="temp-pw">' + esc(a.tempPassword) + '</td></tr>'; }).join('') +
+      '</tbody></table></div><p><button class="btn" id="cred-dl">ดาวน์โหลด CSV</button> <button class="btn ghost" data-close>ปิด</button></p>');
+    on('#cred-dl', 'click', function () {
+      download('accounts.csv', 'text/csv;charset=utf-8', csv([['ชื่อผู้ใช้', 'ชื่อ', 'ห้อง', 'รหัสผ่านชั่วคราว']].concat(list.map(function (a) { return [a.username, a.name || '', a.room || '', a.tempPassword]; }))));
+    });
+  }
+
+  // ======================= สมัครใช้งาน (นักเรียน) =======================
+  views.register = function (p) {
+    h(backBtn() + '<div class="card" style="max-width:520px;margin:16px auto"><h1>สมัครใช้งาน (นักเรียน)</h1>' +
+      '<p class="small muted">กรอกข้อมูลตามทะเบียนของโรงเรียน คำขอต้องได้รับการอนุมัติจากผู้ดูแลก่อนจึงเข้าสู่ระบบได้</p>' +
+      '<form id="reg-form" novalidate>' +
+      '<label for="r-code">รหัสนักเรียน</label><input id="r-code" type="text" inputmode="numeric" maxlength="30" autocomplete="username">' +
+      '<div class="row"><div><label for="r-prefix">คำนำหน้า</label><select id="r-prefix">' + PREFIXES.map(function (x) { return '<option>' + x + '</option>'; }).join('') + '</select></div>' +
+      '<div><label for="r-first">ชื่อ</label><input id="r-first" type="text" maxlength="100"></div>' +
+      '<div><label for="r-last">นามสกุล</label><input id="r-last" type="text" maxlength="100"></div></div>' +
+      '<div class="row"><div><label for="r-class">ชั้น</label><input id="r-class" type="text" maxlength="20" placeholder="เช่น ม.5"></div>' +
+      '<div><label for="r-room">ห้อง</label><input id="r-room" type="text" maxlength="20" placeholder="เช่น 1"></div>' +
+      '<div><label for="r-roll">เลขที่</label><input id="r-roll" type="number" min="0"></div></div>' +
+      '<label for="r-pw">ตั้งรหัสผ่าน (อย่างน้อย 8 ตัว)</label><input id="r-pw" type="password" autocomplete="new-password">' +
+      '<label for="r-pw2">ยืนยันรหัสผ่าน</label><input id="r-pw2" type="password" autocomplete="new-password">' +
+      (p.needsCode ? '<label for="r-regcode">รหัสลงทะเบียน (ขอจากครูหรือผู้ดูแล)</label><input id="r-regcode" type="text" maxlength="50">' : '') +
+      '<div id="reg-msg"></div><p><button class="btn" type="submit">ส่งคำขอ</button></p></form></div>');
+    bindBack();
+    q('#reg-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (q('#r-pw').value !== q('#r-pw2').value) { q('#reg-msg').innerHTML = errBox({ message: 'รหัสผ่านทั้งสองช่องไม่ตรงกัน' }); return; }
+      var btn = q('#reg-form button[type=submit]'); btn.disabled = true;
+      api('auth.register', {
+        studentCode: q('#r-code').value, prefix: q('#r-prefix').value, firstName: q('#r-first').value, lastName: q('#r-last').value,
+        classLevel: q('#r-class').value, room: q('#r-room').value, rollNo: q('#r-roll').value, password: q('#r-pw').value,
+        registrationCode: q('#r-regcode') ? q('#r-regcode').value : ''
+      }).then(function (r) {
+        q('#reg-form').innerHTML = '<div class="notice ok" role="status">' + esc(r.message) + '</div><p><button class="btn" type="button" data-back>กลับไปหน้าเข้าสู่ระบบ</button></p>';
+        bindBack();
+      }).catch(function (err) { q('#reg-msg').innerHTML = errBox(err); btn.disabled = false; });
+    });
+  };
+
+  // ======================= เปิดรายวิชาที่สอน =======================
+  views.offeringForm = function (p) {
+    var isAdmin = C.state.role === 'admin';
+    return Promise.all([api('course.catalog'), api('course.terms'), isAdmin ? api('registry.teachers') : Promise.resolve([])]).then(function (r) {
+      var catalog = r[0], years = r[1], teachers = r[2];
+      var terms = [];
+      years.forEach(function (y) { y.terms.forEach(function (t) { if (t.status !== 'closed') terms.push(t); }); });
+      if (!terms.length) {
+        h(backBtn() + '<h1>เพิ่มรายวิชาที่สอน</h1><div class="notice warn">ยังไม่มีปีการศึกษา/ภาคเรียนที่เปิดอยู่ กรุณาให้ผู้ดูแลเพิ่มที่หน้า "รายวิชาและภาคเรียน"</div>');
+        bindBack(); return;
+      }
+      h(backBtn() + '<h1>เพิ่มรายวิชาที่สอน</h1><form class="card" id="of" novalidate>' +
+        '<label for="o-term">ปีการศึกษา / ภาคเรียน</label><select id="o-term">' + terms.map(function (t) { return '<option value="' + t.id + '">' + esc(t.label) + '</option>'; }).join('') + '</select>' +
+        '<label for="o-course">รายวิชาในหลักสูตร</label><select id="o-course">' + catalog.filter(function (c) { return c.status === 'active'; }).map(function (c) {
+          return '<option value="' + c.id + '">' + esc(c.code) + ' ' + esc(c.nameTh) + '</option>';
+        }).join('') + '<option value="__new">+ เพิ่มรายวิชาใหม่ในหลักสูตร</option></select>' +
+        '<div id="o-new" class="card" hidden><h3 style="margin-top:0">รายวิชาใหม่</h3><div class="row"><div><label for="c-code">รหัสวิชา</label><input id="c-code" type="text" maxlength="30" placeholder="เช่น ว32201"></div>' +
+        '<div><label for="c-name">ชื่อวิชา</label><input id="c-name" type="text" maxlength="200"></div></div>' +
+        '<div class="row"><div><label for="c-area">กลุ่มสาระ</label><input id="c-area" type="text" maxlength="100"></div><div><label for="c-level">ระดับชั้น</label><input id="c-level" type="text" maxlength="20"></div>' +
+        '<div><label for="c-credit">หน่วยกิต</label><input id="c-credit" type="number" min="0" step="0.5"></div></div></div>' +
+        '<div class="row"><div><label for="o-section">กลุ่มเรียน / ห้อง</label><input id="o-section" type="text" maxlength="30" placeholder="เช่น ม.5/1"></div>' +
+        '<div><label for="o-calc">วิธีคำนวณคะแนน</label><select id="o-calc"><option value="per_item">น้ำหนักรายรายการ (รวม 100)</option><option value="per_category">น้ำหนักรายหมวด</option></select></div></div>' +
+        (isAdmin ? '<label for="o-owner">ครูเจ้าของรายวิชา</label><select id="o-owner">' + teachers.filter(function (t) { return t.status === 'active'; }).map(function (t) { return '<option value="' + t.id + '">' + esc(t.code) + ' ' + esc(t.name) + '</option>'; }).join('') + '</select>' : '') +
+        '<div id="of-msg"></div><p><button class="btn" type="submit">บันทึกและเปิดรายวิชา</button></p></form>');
+      bindBack();
+      var toggle = function () { q('#o-new').hidden = q('#o-course').value !== '__new'; };
+      q('#o-course').addEventListener('change', toggle); toggle();
+      q('#of').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var btn = q('#of button[type=submit]'); btn.disabled = true;
+        var courseStep = q('#o-course').value === '__new'
+          ? api('course.save', { code: q('#c-code').value, nameTh: q('#c-name').value, learningArea: q('#c-area').value, gradeLevel: q('#c-level').value, credits: q('#c-credit').value }).then(function (c) { return c.id; })
+          : Promise.resolve(q('#o-course').value);
+        courseStep.then(function (courseId) {
+          return api('offering.save', { courseId: courseId, termId: q('#o-term').value, sectionCode: q('#o-section').value, calcMethod: q('#o-calc').value, ownerTeacherId: q('#o-owner') ? q('#o-owner').value : undefined });
+        }).then(function (o) { toast('เปิดรายวิชาแล้ว'); swap('teacherOffering', { offeringId: o.offeringId }); })
+          .catch(function (err) { q('#of-msg').innerHTML = errBox(err); btn.disabled = false; });
+      });
+    });
+  };
+
+  // ======================= นักเรียนในรายวิชา (ลงทะเบียน/ถอน/รหัสเข้าร่วม) =======================
+  views.offeringRoster = function (p) {
+    return api('offering.roster', { offeringId: p.offeringId }).then(function (d) {
+      var o = d.offering, can = o.perms.can_manage;
+      h(backBtn() + offeringHeader(o) + C.offeringTabs(p, 'offeringRoster', o.perms) +
+        '<p><span class="stat"><b>' + d.counts.active + '</b> กำลังเรียน</span><span class="stat"><b>' + (d.counts.total - d.counts.active) + '</b> ถอน/ย้ายออก</span></p>' +
+        (can ? '<div class="card"><h2 style="margin-top:0">รหัสเข้าร่วมรายวิชา</h2>' +
+          (o.joinEnabled ? '<p>นักเรียนลงทะเบียนเองได้ด้วยรหัส <span class="big-code" id="join-code">' + esc(o.joinCode) + '</span></p>' +
+            '<p><button class="btn ghost small" id="join-regen">สร้างรหัสใหม่</button> <button class="btn ghost small" id="join-off">ปิดการลงทะเบียนเอง</button></p>'
+            : '<p class="muted">ปิดอยู่ — นักเรียนลงทะเบียนเองไม่ได้</p><p><button class="btn small" id="join-on">เปิดให้ลงทะเบียนด้วยรหัส</button></p>') + '</div>' +
+          '<div class="card"><h2 style="margin-top:0">เพิ่มนักเรียนเข้ารายวิชา</h2><p class="small muted">เลือกจากรายชื่อนักเรียนที่มีในระบบ (ผู้ดูแลเป็นผู้เพิ่มนักเรียนเข้าระบบ) การเพิ่มกลางภาคไม่สร้างคะแนนศูนย์ย้อนหลัง</p>' +
+          '<div class="row"><div><label for="c-room">ห้อง</label><select id="c-room"><option value="">ทุกห้อง</option></select></div><div><label for="c-q">ค้นหา</label><input id="c-q" type="text" placeholder="รหัสหรือชื่อ"></div></div>' +
+          '<div id="cand" style="margin-top:8px"><div class="loading">กำลังโหลด…</div></div><div id="enr-msg"></div><p><button class="btn" id="btn-enroll">ลงทะเบียนนักเรียนที่เลือก</button></p></div>' : '') +
+        '<div class="card table-wrap"><table><thead><tr><th>ที่</th><th>รหัส</th><th>ชื่อ - สกุล</th><th>ห้อง</th><th class="hide-sm">เลขที่</th><th class="hide-sm">กลุ่ม</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
+        (d.students.length ? d.students.map(function (s, i) {
+          return '<tr><td>' + (i + 1) + '</td><td>' + esc(s.code) + '</td><td>' + esc(s.name) + (s.source === 'self' ? ' <span class="chip neutral">ลงทะเบียนเอง</span>' : '') + '</td><td>' + esc(s.roomLabel) + '</td>' +
+            '<td class="hide-sm">' + esc(s.rollNo === null ? '' : s.rollNo) + '</td><td class="hide-sm">' + esc(s.workGroup) + '</td>' +
+            '<td><span class="chip ' + (s.status === 'active' ? 'ok' : 'neutral') + '">' + esc(ENR_STATUS[s.status] || s.status) + '</span></td>' +
+            '<td>' + (can && s.status === 'active' ? '<button class="btn ghost small" data-withdraw="' + s.studentId + '" data-name="' + esc(s.name) + '">ถอน</button>' : '') + '</td></tr>';
+        }).join('') : '<tr><td colspan="8" class="empty">ยังไม่มีนักเรียน</td></tr>') + '</tbody></table></div>');
+      bindBack(); C.bindOfferingTabs(p);
+      var setJoin = function (enabled, regen) {
+        api('offering.setJoin', { offeringId: p.offeringId, enabled: enabled, regenerate: !!regen }).then(function () { render(); }).catch(function (err) { toast(err.message); });
+      };
+      on('#join-on', 'click', function () { setJoin(true); });
+      on('#join-off', 'click', function () { setJoin(false); });
+      on('#join-regen', 'click', function () { if (confirm('สร้างรหัสใหม่? รหัสเดิมจะใช้ไม่ได้')) setJoin(true, true); });
+      on('[data-withdraw]', 'click', function (e) {
+        var reason = prompt('เหตุผลที่ถอน ' + e.currentTarget.getAttribute('data-name') + ' ออกจากรายวิชา (ข้อมูลงานและคะแนนเดิมยังเก็บไว้)');
+        if (!reason) return;
+        api('offering.withdraw', { offeringId: p.offeringId, studentId: e.currentTarget.getAttribute('data-withdraw'), reason: reason }).then(function () { toast('ถอนแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+      if (!can) return;
+      var loadCand = function () {
+        var room = q('#c-room').value.split('|');
+        api('offering.candidates', { offeringId: p.offeringId, classLevel: room[0] || '', room: room[1] || '', q: q('#c-q').value }).then(function (c) {
+          var sel = q('#c-room');
+          if (sel.options.length === 1) c.rooms.forEach(function (r) { var op = document.createElement('option'); op.value = r.classLevel + '|' + r.room; op.textContent = r.label + ' (' + r.count + ')'; sel.appendChild(op); });
+          q('#cand').innerHTML = pickList('enr', c.students, { empty: 'ไม่มีนักเรียนที่ยังไม่ได้ลงทะเบียน', label: 'นักเรียนที่เลือกได้' });
+          bindPickAll(q('#cand'));
+        }).catch(function (err) { q('#cand').innerHTML = errBox(err); });
+      };
+      var timer;
+      q('#c-room').addEventListener('change', loadCand);
+      q('#c-q').addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(loadCand, 300); });
+      loadCand();
+      on('#btn-enroll', 'click', function () {
+        var ids = picked('enr', q('#cand'));
+        if (!ids.length) { q('#enr-msg').innerHTML = errBox({ message: 'ยังไม่ได้เลือกนักเรียน' }); return; }
+        api('offering.enroll', { offeringId: p.offeringId, studentIds: ids }).then(function (r) {
+          toast('ลงทะเบียนเพิ่ม ' + (r.added + r.reactivated) + ' คน'); render();
+        }).catch(function (err) { q('#enr-msg').innerHTML = errBox(err); });
+      });
+    });
+  };
+
+  // ======================= กลุ่มประจำรายวิชา (ครู/ผู้ดูแล) =======================
+  views.workGroups = function (p) {
+    return api('wg.overview', { offeringId: p.offeringId }).then(function (d) {
+      var o = d.offering, st = d.settings, can = d.canManage;
+      var everyone = d.ungrouped.map(function (u) { return { id: u.studentId, label: u.code + ' ' + u.name + ' (ยังไม่มีกลุ่ม)' }; });
+      d.groups.forEach(function (g) { g.members.forEach(function (m) { everyone.push({ id: m.studentId, label: m.code + ' ' + m.name + ' (' + g.name + ')' }); }); });
+      h(backBtn() + offeringHeader(o) + C.offeringTabs(p, 'workGroups', o.perms) +
+        '<div class="notice info small">กลุ่มประจำรายวิชาใช้ทำงานกลุ่มได้หลายงาน เมื่อสร้างงานกลุ่มแบบ "ใช้กลุ่มประจำรายวิชา" ระบบสร้างกลุ่มของงานและสมาชิกให้อัตโนมัติ ' +
+        'คะแนนกลุ่มของแต่ละงานเก็บที่กลุ่ม และบันทึกเป็นคะแนนรายบุคคลของสมาชิกโดยอัตโนมัติ เมื่องานถูกส่งหรือให้คะแนนแล้ว การย้ายกลุ่มภายหลังไม่ย้อนไปเปลี่ยนงานเดิม</div>' +
+        (d.groupAssessments.length ? '<p class="small">งานที่ใช้กลุ่มประจำรายวิชา: ' + d.groupAssessments.map(function (a) { return '<span class="chip info">' + esc(a.code) + ' ' + esc(a.title) + '</span>'; }).join(' ') + '</p>' : '') +
+        (can ? '<details class="card"><summary><strong>ตั้งค่าการจัดกลุ่มของนักเรียน</strong></summary>' +
+          '<div class="row"><div><label for="w-max">จำนวนสมาชิกสูงสุดต่อกลุ่ม (0 = ไม่จำกัด)</label><input id="w-max" type="number" min="0" max="50" value="' + st.maxSize + '"></div></div>' +
+          '<label class="check"><input id="w-direct" type="checkbox"' + (st.leaderDirectAdd ? ' checked' : '') + '> หัวหน้ากลุ่มเพิ่มสมาชิกได้ทันที (ไม่ติ๊ก = ส่งคำเชิญให้เพื่อนตอบรับก่อน)</label>' +
+          '<label class="check"><input id="w-lock" type="checkbox"' + (st.locked ? ' checked' : '') + '> ล็อกกลุ่ม (นักเรียนเปลี่ยนสมาชิกไม่ได้ ครู/ผู้ดูแลยังจัดได้)</label>' +
+          '<p><button class="btn small" id="w-save">บันทึกการตั้งค่า</button></p></details>' +
+          '<div class="card"><h2 style="margin-top:0">สร้างกลุ่ม</h2><label for="g-name">ชื่อกลุ่ม</label><input id="g-name" type="text" maxlength="100" placeholder="เช่น กลุ่ม 1">' +
+          '<label>เลือกสมาชิกจากนักเรียนที่ยังไม่มีกลุ่ม (คนแรกที่เลือกเป็นหัวหน้ากลุ่ม)</label><div id="g-pick">' + pickList('newg', d.ungrouped.map(function (u) { return { id: u.studentId, code: u.code, name: u.name, roomLabel: u.roomLabel }; }), { empty: 'ทุกคนมีกลุ่มแล้ว' }) + '</div>' +
+          '<div id="g-msg"></div><p><button class="btn" id="g-create">สร้างกลุ่ม</button></p>' +
+          '<details><summary>สุ่มจัดกลุ่มนักเรียนที่ยังไม่มีกลุ่ม</summary><div class="row"><div><label for="a-size">จำนวนต่อกลุ่ม</label><input id="a-size" type="number" min="1" value="4"></div></div>' +
+          '<label class="check"><input id="a-room" type="checkbox" checked> แยกตามห้อง</label><p><button class="btn ghost small" id="a-run">สุ่มจัดกลุ่ม</button></p></details></div>' : '') +
+        (d.ungrouped.length ? '<div class="notice warn">นักเรียนที่ยังไม่มีกลุ่ม ' + d.ungrouped.length + ' คน: ' + d.ungrouped.map(function (u) { return esc(u.name); }).join(', ') + '</div>' : '') +
+        '<div class="grid">' + (d.groups.length ? d.groups.map(function (g) {
+          var over = st.maxSize && g.count > st.maxSize;
+          return '<div class="card"><h3 style="margin-top:0">' + esc(g.name) + ' <span class="small muted">' + g.count + ' คน</span>' + (over ? ' <span class="chip warn">เกินจำนวน</span>' : '') + '</h3>' +
+            '<ul class="member-list">' + g.members.map(function (m) {
+              return '<li><span>' + (m.isLeader ? '★ ' : '') + esc(m.code) + ' ' + esc(m.name) + ' <span class="small muted">' + esc(m.roomLabel) + '</span>' + (m.enrolled ? '' : ' <span class="chip neutral">ถอนแล้ว</span>') + '</span>' +
+                (can ? '<span>' + (m.isLeader ? '' : '<button class="btn ghost small" data-leader="' + g.id + '" data-sid="' + m.studentId + '" data-ver="' + g.version + '" data-gname="' + esc(g.name) + '" aria-label="ตั้ง ' + esc(m.name) + ' เป็นหัวหน้า">ตั้งหัวหน้า</button> ') +
+                  '<button class="btn ghost small" data-remove="' + g.id + '" data-sid="' + m.studentId + '" aria-label="นำ ' + esc(m.name) + ' ออกจากกลุ่ม">นำออก</button></span>' : '') + '</li>';
+            }).join('') + '</ul>' +
+            (g.invited.length ? '<p class="small muted">รอตอบรับคำเชิญ: ' + g.invited.map(function (m) { return esc(m.name); }).join(', ') + '</p>' : '') +
+            (can ? '<label for="add-' + g.id + '">เพิ่ม/ย้ายสมาชิกเข้ากลุ่มนี้</label><div class="row"><select id="add-' + g.id + '" multiple size="4">' +
+              everyone.filter(function (x) { return !g.members.some(function (m) { return m.studentId === x.id; }); }).map(function (x) { return '<option value="' + x.id + '">' + esc(x.label) + '</option>'; }).join('') +
+              '</select></div><p><button class="btn small" data-add="' + g.id + '">เพิ่มเข้ากลุ่ม</button> <button class="btn ghost small" data-rename="' + g.id + '" data-ver="' + g.version + '" data-gname="' + esc(g.name) + '">เปลี่ยนชื่อ</button> ' +
+              '<button class="btn ghost small" data-disband="' + g.id + '" data-gname="' + esc(g.name) + '">ยุบกลุ่ม</button></p>' : '') + '</div>';
+        }).join('') : '<div class="card empty">ยังไม่มีกลุ่ม</div>') + '</div>');
+      bindBack(); C.bindOfferingTabs(p);
+      if (!can) return;
+      bindPickAll(q('#g-pick'));
+      var done = function (msg) { return function () { toast(msg || 'บันทึกแล้ว'); render(); }; };
+      var fail = function (err) { toast(err.message); };
+      on('#w-save', 'click', function () {
+        api('wg.settings', { offeringId: p.offeringId, maxSize: q('#w-max').value, leaderDirectAdd: q('#w-direct').checked, locked: q('#w-lock').checked }).then(done()).catch(fail);
+      });
+      on('#g-create', 'click', function () {
+        var ids = picked('newg', q('#g-pick'));
+        api('wg.save', { offeringId: p.offeringId, name: q('#g-name').value, studentIds: ids, leaderStudentId: ids[0] }).then(done('สร้างกลุ่มแล้ว')).catch(function (err) { q('#g-msg').innerHTML = errBox(err); });
+      });
+      on('#a-run', 'click', function () {
+        api('wg.auto', { offeringId: p.offeringId, size: q('#a-size').value, byRoom: q('#a-room').checked }).then(function (r) { toast('สร้าง ' + r.created + ' กลุ่ม จาก ' + r.students + ' คน'); render(); }).catch(fail);
+      });
+      on('[data-add]', 'click', function (e) {
+        var gid = e.currentTarget.getAttribute('data-add');
+        var ids = Array.prototype.slice.call(q('#add-' + gid).selectedOptions).map(function (x) { return x.value; });
+        if (!ids.length) { toast('เลือกนักเรียนก่อน (กด Ctrl/⌘ เพื่อเลือกหลายคน)'); return; }
+        api('wg.addMembers', { offeringId: p.offeringId, workGroupId: gid, studentIds: ids }).then(function (r) {
+          toast('บันทึกแล้ว' + (r.moved ? ' (ย้ายจากกลุ่มเดิม ' + r.moved + ' คน)' : '') + (r.overMax ? ' — กลุ่มมีสมาชิกเกินจำนวนที่ตั้งไว้' : '')); render();
+        }).catch(fail);
+      });
+      on('[data-remove]', 'click', function (e) {
+        if (!confirm('นำนักเรียนออกจากกลุ่ม?')) return;
+        api('wg.removeMember', { offeringId: p.offeringId, workGroupId: e.currentTarget.getAttribute('data-remove'), studentId: e.currentTarget.getAttribute('data-sid') }).then(done()).catch(fail);
+      });
+      on('[data-leader]', 'click', function (e) {
+        var b = e.currentTarget;
+        api('wg.save', { offeringId: p.offeringId, id: b.getAttribute('data-leader'), name: b.getAttribute('data-gname'), leaderStudentId: b.getAttribute('data-sid'), version: Number(b.getAttribute('data-ver')) }).then(done()).catch(fail);
+      });
+      on('[data-rename]', 'click', function (e) {
+        var b = e.currentTarget;
+        var name = prompt('ชื่อกลุ่มใหม่', b.getAttribute('data-gname'));
+        if (!name) return;
+        api('wg.save', { offeringId: p.offeringId, id: b.getAttribute('data-rename'), name: name, version: Number(b.getAttribute('data-ver')) }).then(done()).catch(fail);
+      });
+      on('[data-disband]', 'click', function (e) {
+        if (!confirm('ยุบกลุ่ม ' + e.currentTarget.getAttribute('data-gname') + '? (งานที่ส่ง/ให้คะแนนแล้วยังเก็บไว้ครบ)')) return;
+        api('wg.disband', { offeringId: p.offeringId, workGroupId: e.currentTarget.getAttribute('data-disband') }).then(done()).catch(fail);
+      });
+    });
+  };
+
+  // ======================= กลุ่มของฉัน (นักเรียน) =======================
+  views.studentGroups = function (p) {
+    return api('wg.mine', { offeringId: p.offeringId }).then(function (d) {
+      var st = d.settings, my = d.myGroup;
+      var html = backBtn() + '<h1>' + esc(p.title || 'รายวิชา') + '</h1>' + C.studentTabs(p, 'studentGroups') +
+        (st.locked ? '<div class="notice warn">ครูล็อกการจัดกลุ่มแล้ว หากต้องการเปลี่ยนสมาชิกกรุณาติดต่อครู</div>' : '') +
+        '<p class="small muted">กลุ่มประจำรายวิชาใช้ทำงานกลุ่มได้หลายงาน หนึ่งคนอยู่ได้หนึ่งกลุ่มต่อรายวิชา' + (st.maxSize ? ' · สมาชิกไม่เกิน ' + st.maxSize + ' คน' : '') + '</p>';
+      if (my) {
+        html += '<div class="card"><h2 style="margin-top:0">' + esc(my.name) + (my.isLeader ? ' <span class="chip info">คุณเป็นหัวหน้ากลุ่ม</span>' : '') + '</h2><ul class="member-list">' +
+          my.members.map(function (m) {
+            return '<li><span>' + (m.isLeader ? '★ ' : '') + esc(m.name) + ' <span class="small muted">' + esc(m.roomLabel) + '</span>' + (m.isLeader ? ' — หัวหน้ากลุ่ม' : '') + '</span>' +
+              (my.isLeader && !m.isLeader && !st.locked ? '<button class="btn ghost small" data-kick="' + m.studentId + '" aria-label="นำ ' + esc(m.name) + ' ออก">นำออก</button>' : '') + '</li>';
+          }).join('') + '</ul>' +
+          (my.invited.length ? '<p class="small muted">รอตอบรับคำเชิญ: ' + my.invited.map(function (m) {
+            return esc(m.name) + (my.isLeader && !st.locked ? ' <button class="btn ghost small" data-kick="' + m.studentId + '">ยกเลิก</button>' : '');
+          }).join(', ') + '</p>' : '');
+        if (my.isLeader && !st.locked) {
+          html += '<h3>เลือกสมาชิกเข้ากลุ่ม</h3><p class="small muted">' + (st.leaderDirectAdd ? 'ครูอนุญาตให้หัวหน้าเพิ่มสมาชิกได้ทันที' : 'ระบบจะส่งคำเชิญ เพื่อนต้องกดตอบรับจึงเข้ากลุ่ม') + '</p>' +
+            '<div id="inv-pick">' + pickList('inv', d.classmates, { empty: 'ไม่มีเพื่อนที่ยังไม่มีกลุ่ม', label: 'เพื่อนที่ยังไม่มีกลุ่ม' }) + '</div>' +
+            '<div id="inv-msg"></div><p><button class="btn" id="btn-inv"' + (d.classmates.length ? '' : ' disabled') + '>' + (st.leaderDirectAdd ? 'เพิ่มเข้ากลุ่ม' : 'ส่งคำเชิญ') + '</button></p>';
+        }
+        if (!st.locked) html += '<p><button class="btn ghost small" id="btn-leave">ออกจากกลุ่ม</button></p>';
+        html += '</div>';
+      } else {
+        html += '<div class="notice warn">คุณยังไม่มีกลุ่มในรายวิชานี้</div>';
+        if (d.invitations.length) html += '<div class="card"><h2 style="margin-top:0">คำเชิญถึงคุณ</h2>' + d.invitations.map(function (i) {
+          return '<div class="file-row"><span><strong>' + esc(i.groupName) + '</strong> <span class="small muted">' + i.members.map(esc).join(', ') + '</span></span>' +
+            '<span><button class="btn small" data-respond="' + i.memberId + '" data-ok="1">ตอบรับ</button> <button class="btn ghost small" data-respond="' + i.memberId + '" data-ok="0">ปฏิเสธ</button></span></div>';
+        }).join('') + '</div>';
+        if (!st.locked) html += '<div class="card"><h2 style="margin-top:0">สร้างกลุ่มใหม่ (คุณเป็นหัวหน้ากลุ่ม)</h2><div class="row"><input id="wg-name" type="text" maxlength="100" placeholder="ชื่อกลุ่ม" aria-label="ชื่อกลุ่ม"><button class="btn" id="btn-wg-create" style="flex:0 0 auto">สร้างกลุ่ม</button></div><div id="wg-msg"></div></div>';
+      }
+      if (d.otherGroups.length) html += '<div class="card"><h3 style="margin-top:0">กลุ่มอื่นในรายวิชา</h3><p>' + d.otherGroups.map(function (g) { return '<span class="chip neutral">' + esc(g.name) + ' (' + g.count + ')</span>'; }).join(' ') + '</p></div>';
+      if (d.groupAssessments.length) html += '<div class="card"><h3 style="margin-top:0">งานกลุ่มที่ใช้กลุ่มนี้</h3><ul>' + d.groupAssessments.map(function (a) { return '<li>' + esc(a.code) + ' ' + esc(a.title) + '</li>'; }).join('') + '</ul></div>';
+      h(html);
+      bindBack(); C.bindTabs(p);
+      var after = function (pr, msg) { return pr.then(function () { toast(msg || 'บันทึกแล้ว'); render(); }); };
+      bindPickAll(q('#inv-pick'));
+      on('#btn-inv', 'click', function () {
+        var ids = picked('inv', q('#inv-pick'));
+        if (!ids.length) { q('#inv-msg').innerHTML = errBox({ message: 'ยังไม่ได้เลือกเพื่อน' }); return; }
+        after(api('wg.invite', { offeringId: p.offeringId, studentIds: ids }), st.leaderDirectAdd ? 'เพิ่มสมาชิกแล้ว' : 'ส่งคำเชิญแล้ว').catch(function (err) { q('#inv-msg').innerHTML = errBox(err); });
+      });
+      on('#btn-wg-create', 'click', function () { after(api('wg.create', { offeringId: p.offeringId, name: q('#wg-name').value }), 'สร้างกลุ่มแล้ว').catch(function (err) { q('#wg-msg').innerHTML = errBox(err); }); });
+      on('#btn-leave', 'click', function () { if (confirm('ออกจากกลุ่ม?')) after(api('wg.leave', { offeringId: p.offeringId })).catch(function (err) { toast(err.message); }); });
+      on('[data-kick]', 'click', function (e) { after(api('wg.leaderRemove', { offeringId: p.offeringId, studentId: e.currentTarget.getAttribute('data-kick') })).catch(function (err) { toast(err.message); }); });
+      on('[data-respond]', 'click', function (e) {
+        after(api('wg.respond', { memberId: e.currentTarget.getAttribute('data-respond'), accept: e.currentTarget.getAttribute('data-ok') === '1' })).catch(function (err) { toast(err.message); });
+      });
+    });
+  };
+
+  // ======================= ผู้ดูแล: นักเรียน =======================
+  views.adminStudents = function (p) {
+    p = p || {};
+    return api('registry.students', { classLevel: p.classLevel || '', room: p.room || '', status: p.status === undefined ? 'active' : p.status, q: p.q || '' }).then(function (d) {
+      h(backBtn() + '<h1>นักเรียน</h1><p><button class="btn" id="btn-add">+ เพิ่มนักเรียน</button> <button class="btn ghost" id="btn-import">นำเข้าจาก Excel / CSV</button></p>' +
+        '<div class="card"><div class="row"><div><label for="f-room">ห้อง</label><select id="f-room"><option value="">ทุกห้อง</option>' +
+        d.rooms.map(function (r) { var v = r.classLevel + '|' + r.room; return '<option value="' + esc(v) + '"' + (v === (p.classLevel || '') + '|' + (p.room || '') ? ' selected' : '') + '>' + esc(r.label) + ' (' + r.count + ')</option>'; }).join('') + '</select></div>' +
+        '<div><label for="f-status">สถานะ</label><select id="f-status"><option value="">ทั้งหมด</option>' + Object.keys(STUDENT_STATUS).map(function (k) {
+          return '<option value="' + k + '"' + ((p.status === undefined ? 'active' : p.status) === k ? ' selected' : '') + '>' + STUDENT_STATUS[k] + '</option>';
+        }).join('') + '</select></div><div><label for="f-q">ค้นหา</label><input id="f-q" type="text" value="' + esc(p.q || '') + '" placeholder="รหัสหรือชื่อ"></div></div></div>' +
+        '<p class="small muted">แสดง ' + d.students.length + ' จากทั้งหมด ' + d.total + ' คน</p>' +
+        '<div class="card table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่อ - สกุล</th><th>ห้อง</th><th class="hide-sm">เลขที่</th><th>บัญชี</th><th></th></tr></thead><tbody>' +
+        (d.students.length ? d.students.map(function (s) {
+          return '<tr><td>' + esc(s.code) + '</td><td>' + esc(s.name) + (s.status !== 'active' ? ' <span class="chip neutral">' + esc(STUDENT_STATUS[s.status]) + '</span>' : '') + '</td><td>' + esc(s.roomLabel) + '</td><td class="hide-sm">' + esc(s.rollNo === null ? '' : s.rollNo) + '</td>' +
+            '<td>' + (s.username ? esc(s.username) + (s.accountStatus === 'disabled' ? ' <span class="chip bad">ปิดอยู่</span>' : s.mustChangePassword ? ' <span class="chip warn">ยังไม่เปลี่ยนรหัส</span>' : ' <span class="chip ok">ใช้งาน</span>') : '<span class="chip neutral">ยังไม่มีบัญชี</span>') + '</td>' +
+            '<td><button class="btn ghost small" data-edit="' + s.id + '">แก้ไข</button> ' +
+            (s.userId ? '<button class="btn ghost small" data-reset="' + s.userId + '" data-name="' + esc(s.name) + '">รีเซ็ตรหัส</button> <button class="btn ghost small" data-status="' + s.userId + '" data-to="' + (s.accountStatus === 'disabled' ? 'active' : 'disabled') + '">' + (s.accountStatus === 'disabled' ? 'เปิดบัญชี' : 'ปิดบัญชี') + '</button>'
+              : '<button class="btn ghost small" data-account="' + s.id + '">สร้างบัญชี</button>') + '</td></tr>';
+        }).join('') : '<tr><td colspan="6" class="empty">ไม่พบนักเรียน</td></tr>') + '</tbody></table></div>');
+      bindBack();
+      var reload = function () {
+        var room = q('#f-room').value.split('|');
+        swap('adminStudents', { classLevel: room[0] || '', room: room[1] || '', status: q('#f-status').value, q: q('#f-q').value });
+      };
+      q('#f-room').addEventListener('change', reload);
+      q('#f-status').addEventListener('change', reload);
+      q('#f-q').addEventListener('change', reload);
+      on('#btn-add', 'click', function () { studentForm(null); });
+      on('#btn-import', 'click', function () { go('adminImport'); });
+      on('[data-edit]', 'click', function (e) { studentForm(d.students.filter(function (s) { return s.id === e.currentTarget.getAttribute('data-edit'); })[0]); });
+      on('[data-reset]', 'click', function (e) {
+        var b = e.currentTarget;
+        if (!confirm('รีเซ็ตรหัสผ่านของ ' + b.getAttribute('data-name') + '? (ผู้ใช้จะถูกออกจากระบบทุกอุปกรณ์)')) return;
+        api('admin.resetPassword', { userId: b.getAttribute('data-reset') }).then(function (r) {
+          showCredentials([{ username: '', name: b.getAttribute('data-name'), tempPassword: r.tempPassword }], 'รหัสผ่านชั่วคราวใหม่');
+        }).catch(function (err) { toast(err.message); });
+      });
+      on('[data-status]', 'click', function (e) {
+        var b = e.currentTarget, to = b.getAttribute('data-to');
+        var reason = to === 'disabled' ? prompt('เหตุผลที่ปิดบัญชี (งานและคะแนนเดิมยังเก็บไว้)') : 'เปิดใช้งานอีกครั้ง';
+        if (!reason) return;
+        api('admin.setUserStatus', { userId: b.getAttribute('data-status'), status: to, reason: reason }).then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+      on('[data-account]', 'click', function (e) {
+        api('admin.createStudentAccount', { studentId: e.currentTarget.getAttribute('data-account') }).then(function (r) {
+          showCredentials([{ username: r.username, tempPassword: r.tempPassword }]); render();
+        }).catch(function (err) { toast(err.message); });
+      });
+    });
+  };
+
+  function studentForm(s) {
+    var v = s || { status: 'active' };
+    C.openModal('<h2 id="modal-title" style="margin-top:0">' + (s ? 'แก้ไขข้อมูลนักเรียน' : 'เพิ่มนักเรียน') + '</h2><form id="sf2" novalidate>' +
+      '<div class="row"><div><label for="s-code">รหัสนักเรียน</label><input id="s-code" type="text" maxlength="30" value="' + esc(v.code || '') + '"></div>' +
+      '<div><label for="s-prefix">คำนำหน้า</label><input id="s-prefix" type="text" list="prefix-list" maxlength="30" value="' + esc(v.prefix || '') + '"><datalist id="prefix-list">' + PREFIXES.map(function (x) { return '<option value="' + x + '">'; }).join('') + '</datalist></div></div>' +
+      '<div class="row"><div><label for="s-first">ชื่อ</label><input id="s-first" type="text" maxlength="100" value="' + esc(v.firstName || '') + '"></div>' +
+      '<div><label for="s-last">นามสกุล</label><input id="s-last" type="text" maxlength="100" value="' + esc(v.lastName || '') + '"></div></div>' +
+      '<div class="row"><div><label for="s-class">ชั้น</label><input id="s-class" type="text" maxlength="20" value="' + esc(v.classLevel || '') + '" placeholder="ม.5"></div>' +
+      '<div><label for="s-room">ห้อง</label><input id="s-room" type="text" maxlength="20" value="' + esc(v.room || '') + '" placeholder="1"></div>' +
+      '<div><label for="s-roll">เลขที่</label><input id="s-roll" type="number" min="0" value="' + esc(v.rollNo === null || v.rollNo === undefined ? '' : v.rollNo) + '"></div></div>' +
+      '<label for="s-status">สถานะ</label><select id="s-status">' + Object.keys(STUDENT_STATUS).map(function (k) { return '<option value="' + k + '"' + (v.status === k ? ' selected' : '') + '>' + STUDENT_STATUS[k] + '</option>'; }).join('') + '</select>' +
+      (s ? '' : '<label class="check"><input id="s-acc" type="checkbox" checked> สร้างบัญชีเข้าระบบ (ชื่อผู้ใช้ = รหัสนักเรียน)</label>') +
+      '<div id="sf2-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" data-close>ยกเลิก</button></p></form>');
+    q('#sf2').addEventListener('submit', function (e) {
+      e.preventDefault();
+      api('admin.saveStudent', {
+        id: s ? s.id : undefined, version: s ? s.version : undefined, studentCode: q('#s-code').value, prefix: q('#s-prefix').value,
+        firstName: q('#s-first').value, lastName: q('#s-last').value, classLevel: q('#s-class').value, room: q('#s-room').value,
+        rollNo: q('#s-roll').value, status: q('#s-status').value, createAccount: q('#s-acc') ? q('#s-acc').checked : false
+      }).then(function (r) {
+        document.getElementById('modal').close();
+        render();
+        if (r.account) showCredentials([{ username: r.account.username, name: r.student.name, tempPassword: r.account.tempPassword }]);
+        else toast('บันทึกแล้ว');
+      }).catch(function (err) { q('#sf2-msg').innerHTML = errBox(err); });
+    });
+  }
+
+  views.adminImport = function () {
+    var RESULT = { insert: ['ok', 'เพิ่มใหม่'], update: ['info', 'แก้ไข'], skip: ['neutral', 'ข้าม'], error: ['bad', 'ผิด'] };
+    h(backBtn() + '<h1>นำเข้านักเรียนเป็นชุด</h1>' +
+      '<div class="card"><p class="small">วางข้อมูลที่คัดลอกจาก Excel (แถวแรกเป็นหัวตาราง) หรือเลือกไฟล์ .csv/.tsv (UTF-8) หัวตารางที่รู้จัก: ' +
+      '<code>รหัสนักเรียน, คำนำหน้า, ชื่อ, นามสกุล, ชั้น, ห้อง, เลขที่</code> หรือ <code>student_code, prefix, first_name, last_name, class_level, room, roll_no</code> ' +
+      '(ใช้คอลัมน์ "ชื่อ-นามสกุล" คอลัมน์เดียว หรือ "ชั้น" แบบ ม.5/1 ได้)</p>' +
+      '<p class="small muted">รหัสนักเรียนเก็บเป็นข้อความเสมอ หากเปิดไฟล์ใน Excel แล้วเลข 0 หน้ารหัสหายไป ให้ตั้งคอลัมน์เป็นข้อความก่อนคัดลอก ระบบไม่เติมศูนย์ให้เอง · ค่าว่างไม่ลบข้อมูลเดิม · นำเข้าไฟล์เดิมซ้ำไม่สร้างนักเรียนซ้ำ</p>' +
+      '<p><button class="btn ghost small" id="imp-sample">ดาวน์โหลดไฟล์ตัวอย่าง</button> <label class="btn ghost small" for="imp-file" style="display:inline-flex;margin:0">เลือกไฟล์ CSV</label><input id="imp-file" type="file" accept=".csv,.tsv,.txt,text/csv" hidden></p>' +
+      '<label for="imp-text">ข้อมูล</label><textarea id="imp-text" style="min-height:180px" placeholder="รหัสนักเรียน&#9;คำนำหน้า&#9;ชื่อ&#9;นามสกุล&#9;ชั้น&#9;ห้อง&#9;เลขที่"></textarea>' +
+      '<label class="check"><input id="imp-acc" type="checkbox" checked> สร้างบัญชีเข้าระบบให้นักเรียนใหม่ (รหัสผ่านชั่วคราว)</label>' +
+      '<div id="imp-msg"></div><p><button class="btn" id="imp-check">ตรวจสอบข้อมูล</button></p></div><div id="imp-preview"></div>');
+    bindBack();
+    on('#imp-sample', 'click', function () {
+      download('ตัวอย่างนำเข้านักเรียน.csv', 'text/csv;charset=utf-8', '﻿รหัสนักเรียน,คำนำหน้า,ชื่อ,นามสกุล,ชั้น,ห้อง,เลขที่\r\n00501,นาย,สมชาย,ตัวอย่าง,ม.4,1,1\r\n00502,นางสาว,สมหญิง,ตัวอย่าง,ม.4,1,2\r\n');
+    });
+    q('#imp-file').addEventListener('change', function () {
+      var file = q('#imp-file').files[0];
+      if (!file) return;
+      var r = new FileReader();
+      r.onload = function () { q('#imp-text').value = String(r.result); };
+      r.readAsText(file, 'utf-8');
+    });
+    var run = function (commit, skipErrors) {
+      q('#imp-msg').innerHTML = '';
+      return api('admin.importStudents', { text: q('#imp-text').value, commit: commit, skipErrors: skipErrors, createAccounts: q('#imp-acc').checked });
+    };
+    on('#imp-check', 'click', function () {
+      run(false).then(function (pv) {
+        var c = pv.counts;
+        q('#imp-preview').innerHTML = '<div class="card"><h2 style="margin-top:0">ตรวจสอบก่อนบันทึก</h2>' +
+          '<p><span class="stat"><b>' + c.insert + '</b> เพิ่มใหม่</span><span class="stat"><b>' + c.update + '</b> แก้ไข</span><span class="stat"><b>' + c.skip + '</b> ข้าม (เหมือนเดิม)</span><span class="stat"><b>' + c.error + '</b> ผิด</span></p>' +
+          pv.warnings.map(function (w) { return '<div class="notice warn">' + esc(w) + '</div>'; }).join('') +
+          '<p class="small muted">จับคู่คอลัมน์: ' + Object.keys(pv.mapping).map(function (k) { return esc(k) + ' ← "' + esc(pv.mapping[k]) + '"'; }).join(', ') + '</p>' +
+          '<div class="table-wrap table-scroll"><table><thead><tr><th>แถว</th><th>รหัส</th><th>ชื่อ</th><th>ห้อง</th><th>ผล</th><th>รายละเอียด</th></tr></thead><tbody>' +
+          pv.rows.map(function (r) { var x = RESULT[r.result]; return '<tr><td>' + r.rowNo + '</td><td>' + esc(r.code) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.room) + '</td><td><span class="chip ' + x[0] + '">' + x[1] + '</span></td><td class="small">' + esc(r.message) + '</td></tr>'; }).join('') +
+          '</tbody></table></div>' +
+          (c.error ? '<label class="check"><input id="imp-skip" type="checkbox"> นำเข้าเฉพาะแถวที่ถูกต้อง (ข้ามแถวที่ผิด ' + c.error + ' แถว)</label>' : '') +
+          '<div id="imp-msg2"></div><p><button class="btn" id="imp-commit"' + (c.insert + c.update ? '' : ' disabled') + '>ยืนยันนำเข้า</button></p></div>';
+        on('#imp-commit', 'click', function () {
+          var btn = q('#imp-commit'); btn.disabled = true;
+          run(true, q('#imp-skip') ? q('#imp-skip').checked : false).then(function (res) {
+            q('#imp-preview').innerHTML = '<div class="notice ok" role="status">นำเข้าแล้ว: เพิ่มใหม่ ' + res.counts.insert + ' คน แก้ไข ' + res.counts.update + ' คน' +
+              (res.skippedRows.length ? ' · ข้ามแถวที่ผิด: ' + res.skippedRows.map(function (r) { return r.rowNo; }).join(', ') : '') + '</div>';
+            if (res.accounts.length) showCredentials(res.accounts, 'บัญชีนักเรียนที่สร้างใหม่ ' + res.accounts.length + ' บัญชี');
+          }).catch(function (err) { q('#imp-msg2').innerHTML = errBox(err); btn.disabled = false; });
+        });
+      }).catch(function (err) { q('#imp-msg').innerHTML = errBox(err); });
+    });
+  };
+
+  // ======================= ผู้ดูแล: ครูและบทบาท =======================
+  views.adminTeachers = function () {
+    return Promise.all([api('registry.teachers'), api('admin.staffUsers')]).then(function (r) {
+      var teachers = r[0], staff = r[1];
+      var roleChips = function (roles) {
+        return (roles || []).map(function (x) { return '<span class="chip ' + (x === 'admin' ? 'bad' : x === 'grade_admin' ? 'warn' : 'neutral') + '">' + ({ admin: 'ผู้ดูแล', grade_admin: 'ผู้ดูแลคะแนน', teacher: 'ครู', student: 'นักเรียน' }[x] || x) + '</span>'; }).join(' ');
+      };
+      h(backBtn() + '<h1>ครูและผู้ดูแล</h1><p><button class="btn" id="btn-add-t">+ เพิ่มครู</button></p>' +
+        '<div class="card table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่อ</th><th class="hide-sm">กลุ่มสาระ</th><th>บัญชี / บทบาท</th><th></th></tr></thead><tbody>' +
+        (teachers.length ? teachers.map(function (t) {
+          var isGA = (t.roles || []).indexOf('grade_admin') >= 0;
+          return '<tr><td>' + esc(t.code) + '</td><td>' + esc(t.name) + (t.status !== 'active' ? ' <span class="chip neutral">ไม่ใช้งาน</span>' : '') + '</td><td class="hide-sm">' + esc(t.department) + '</td>' +
+            '<td>' + (t.username ? esc(t.username) + ' ' + roleChips(t.roles) + (t.accountStatus === 'disabled' ? ' <span class="chip bad">ปิดอยู่</span>' : '') : '<span class="chip neutral">ไม่มีบัญชี</span>') + '</td>' +
+            '<td><button class="btn ghost small" data-edit-t="' + t.id + '">แก้ไข</button> ' +
+            (t.userId ? '<button class="btn ghost small" data-reset="' + t.userId + '" data-name="' + esc(t.name) + '">รีเซ็ตรหัส</button> ' +
+              '<button class="btn ghost small" data-role="' + t.userId + '" data-grant="' + (isGA ? '0' : '1') + '">' + (isGA ? 'ถอนสิทธิ์ผู้ดูแลคะแนน' : 'ให้สิทธิ์ผู้ดูแลคะแนน') + '</button>' : '') + '</td></tr>';
+        }).join('') : '<tr><td colspan="5" class="empty">ยังไม่มีครู</td></tr>') + '</tbody></table></div>' +
+        '<h2>ผู้ดูแลระบบ</h2><p class="small muted">"ผู้ดูแลคะแนน" = ผู้ดูแลที่ให้/แก้คะแนนแทนครูได้ทุกรายวิชา ทุกการแก้มีประวัติและบันทึกตรวจสอบ</p>' +
+        '<div class="card table-wrap"><table><thead><tr><th>ชื่อผู้ใช้</th><th>ชื่อ</th><th>บทบาท</th><th></th></tr></thead><tbody>' + staff.map(function (u) {
+          var isGA = u.roles.indexOf('grade_admin') >= 0;
+          return '<tr><td>' + esc(u.username) + '</td><td>' + esc(u.displayName) + '</td><td>' + roleChips(u.roles) + '</td><td>' +
+            '<button class="btn ghost small" data-role="' + u.userId + '" data-grant="' + (isGA ? '0' : '1') + '">' + (isGA ? 'ถอนสิทธิ์ผู้ดูแลคะแนน' : 'ให้สิทธิ์ผู้ดูแลคะแนน') + '</button></td></tr>';
+        }).join('') + '</tbody></table></div>');
+      bindBack();
+      on('#btn-add-t', 'click', function () { teacherForm(null); });
+      on('[data-edit-t]', 'click', function (e) { teacherForm(teachers.filter(function (t) { return t.id === e.currentTarget.getAttribute('data-edit-t'); })[0]); });
+      on('[data-reset]', 'click', function (e) {
+        var b = e.currentTarget;
+        if (!confirm('รีเซ็ตรหัสผ่านของ ' + b.getAttribute('data-name') + '?')) return;
+        api('admin.resetPassword', { userId: b.getAttribute('data-reset') }).then(function (res) {
+          showCredentials([{ username: '', name: b.getAttribute('data-name'), tempPassword: res.tempPassword }], 'รหัสผ่านชั่วคราวใหม่');
+        }).catch(function (err) { toast(err.message); });
+      });
+      on('[data-role]', 'click', function (e) {
+        var b = e.currentTarget, grant = b.getAttribute('data-grant') === '1';
+        var reason = prompt((grant ? 'เหตุผลที่ให้' : 'เหตุผลที่ถอน') + 'สิทธิ์ผู้ดูแลคะแนน');
+        if (reason === null) return;
+        api('admin.setRole', { userId: b.getAttribute('data-role'), role: 'grade_admin', grant: grant, reason: reason }).then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+    });
+  };
+
+  function teacherForm(t) {
+    var v = t || {};
+    C.openModal('<h2 id="modal-title" style="margin-top:0">' + (t ? 'แก้ไขข้อมูลครู' : 'เพิ่มครู') + '</h2><form id="tf" novalidate>' +
+      '<div class="row"><div><label for="t-code">รหัสครู</label><input id="t-code" type="text" maxlength="30" value="' + esc(v.code || '') + '"></div>' +
+      '<div><label for="t-prefix">คำนำหน้า</label><input id="t-prefix" type="text" maxlength="30" value="' + esc(v.prefix || '') + '"></div></div>' +
+      '<div class="row"><div><label for="t-first">ชื่อ</label><input id="t-first" type="text" maxlength="100" value="' + esc(v.firstName || '') + '"></div>' +
+      '<div><label for="t-last">นามสกุล</label><input id="t-last" type="text" maxlength="100" value="' + esc(v.lastName || '') + '"></div></div>' +
+      '<label for="t-dept">กลุ่มสาระ</label><input id="t-dept" type="text" maxlength="100" value="' + esc(v.department || '') + '">' +
+      (t ? '<label for="t-status">สถานะ</label><select id="t-status"><option value="active">ใช้งาน</option><option value="inactive"' + (v.status === 'inactive' ? ' selected' : '') + '>ไม่ใช้งาน</option></select>'
+        : '<label for="t-user">ชื่อผู้ใช้ (ว่าง = ใช้รหัสครู)</label><input id="t-user" type="text" maxlength="100" autocapitalize="off">') +
+      '<div id="tf-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" data-close>ยกเลิก</button></p></form>');
+    q('#tf').addEventListener('submit', function (e) {
+      e.preventDefault();
+      api('admin.saveTeacher', {
+        id: t ? t.id : undefined, version: t ? t.version : undefined, teacherCode: q('#t-code').value, prefix: q('#t-prefix').value,
+        firstName: q('#t-first').value, lastName: q('#t-last').value, department: q('#t-dept').value,
+        status: q('#t-status') ? q('#t-status').value : 'active', username: q('#t-user') ? q('#t-user').value : undefined
+      }).then(function (r) {
+        document.getElementById('modal').close();
+        render();
+        if (r.account) showCredentials([{ username: r.account.username, name: r.teacher.name, tempPassword: r.account.tempPassword }], 'บัญชีครูที่สร้างใหม่');
+        else toast('บันทึกแล้ว');
+      }).catch(function (err) { q('#tf-msg').innerHTML = errBox(err); });
+    });
+  }
+
+  // ======================= ผู้ดูแล: รายวิชาและภาคเรียน =======================
+  views.adminCourses = function () {
+    return Promise.all([api('course.terms'), api('course.catalog'), api('offering.list', {}), api('registry.teachers')]).then(function (r) {
+      var years = r[0], catalog = r[1], offerings = r[2], teachers = r[3];
+      h(backBtn() + '<h1>รายวิชาและภาคเรียน</h1>' +
+        '<div class="card"><h2 style="margin-top:0">ปีการศึกษาและภาคเรียน</h2>' + (years.length ? '<ul class="member-list">' + years.map(function (y) {
+          return '<li><span><strong>ปี ' + esc(y.yearBe) + '</strong> ' + y.terms.map(function (t) { return '<span class="chip ' + (t.status === 'closed' ? 'neutral' : 'ok') + '">' + esc(t.name) + '</span>'; }).join(' ') + '</span>' +
+            (y.terms.some(function (t) { return t.termNo === 3; }) ? '' : '<button class="btn ghost small" data-summer="' + y.id + '">+ ภาคฤดูร้อน</button>') + '</li>';
+        }).join('') + '</ul>' : '<p class="muted">ยังไม่มีปีการศึกษา</p>') +
+        '<div class="row"><div><label for="y-be">เพิ่มปีการศึกษา (พ.ศ.)</label><input id="y-be" type="number" min="2500" max="2700" placeholder="เช่น 2570"></div></div>' +
+        '<p class="small muted">สร้างภาคเรียนที่ 1 และ 2 ให้อัตโนมัติ</p><div id="y-msg"></div><p><button class="btn small" id="y-add">เพิ่มปีการศึกษา</button></p></div>' +
+        '<div class="card"><h2 style="margin-top:0">รายวิชาที่เปิดสอน</h2><p><button class="btn" id="o-add">+ เปิดรายวิชาให้ครู</button></p><div class="table-wrap"><table><thead><tr><th>รายวิชา</th><th>กลุ่มเรียน</th><th>ปี/ภาค</th><th class="hide-sm">ครูเจ้าของ</th><th>นักเรียน</th><th></th></tr></thead><tbody>' +
+        (offerings.length ? offerings.map(function (o) {
+          return '<tr><td>' + esc(o.courseCode) + ' ' + esc(o.courseName) + (o.status !== 'open' ? ' <span class="chip neutral">' + esc({ draft: 'ฉบับร่าง', closed: 'ปิดผลแล้ว', archived: 'เก็บถาวร' }[o.status] || o.status) + '</span>' : '') + '</td><td>' + esc(o.section) + '</td><td>' + esc(o.yearBe) + '/' + esc(o.termNo) + '</td>' +
+            '<td class="hide-sm">' + esc(o.ownerName) + '</td><td>' + o.students + '</td><td><button class="btn small" data-open-off="' + o.offeringId + '">เปิด</button> <button class="btn ghost small" data-edit-off="' + o.offeringId + '">แก้ไข</button></td></tr>';
+        }).join('') : '<tr><td colspan="6" class="empty">ยังไม่มีรายวิชาที่เปิดสอน</td></tr>') + '</tbody></table></div></div>' +
+        '<div class="card"><h2 style="margin-top:0">รายวิชาในหลักสูตร</h2><p><button class="btn ghost" id="c-add">+ เพิ่มรายวิชาในหลักสูตร</button></p><div class="table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่อวิชา</th><th class="hide-sm">กลุ่มสาระ</th><th class="hide-sm">หน่วยกิต</th><th></th></tr></thead><tbody>' +
+        (catalog.length ? catalog.map(function (c) {
+          return '<tr><td>' + esc(c.code) + '</td><td>' + esc(c.nameTh) + (c.status !== 'active' ? ' <span class="chip neutral">ไม่ใช้งาน</span>' : '') + '</td><td class="hide-sm">' + esc(c.learningArea) + '</td><td class="hide-sm">' + esc(c.credits) + '</td><td><button class="btn ghost small" data-edit-c="' + c.id + '">แก้ไข</button></td></tr>';
+        }).join('') : '<tr><td colspan="5" class="empty">ยังไม่มีรายวิชา</td></tr>') + '</tbody></table></div></div>');
+      bindBack();
+      on('#y-add', 'click', function () { api('admin.saveYear', { yearBe: q('#y-be').value }).then(function () { toast('เพิ่มปีการศึกษาแล้ว'); render(); }).catch(function (err) { q('#y-msg').innerHTML = errBox(err); }); });
+      on('[data-summer]', 'click', function (e) { api('admin.saveTerm', { academicYearId: e.currentTarget.getAttribute('data-summer'), termNo: 3 }).then(function () { render(); }).catch(function (err) { toast(err.message); }); });
+      on('#o-add', 'click', function () { go('offeringForm'); });
+      on('[data-open-off]', 'click', function (e) { go('teacherOffering', { offeringId: e.currentTarget.getAttribute('data-open-off') }); });
+      on('[data-edit-off]', 'click', function (e) {
+        var o = offerings.filter(function (x) { return x.offeringId === e.currentTarget.getAttribute('data-edit-off'); })[0];
+        C.openModal('<h2 id="modal-title" style="margin-top:0">แก้ไขรายวิชาที่เปิดสอน</h2><form id="eo">' +
+          '<p>' + esc(o.courseCode) + ' ' + esc(o.courseName) + ' · ปี ' + esc(o.yearBe) + ' ภาค ' + esc(o.termNo) + '</p>' +
+          '<label for="eo-sec">กลุ่มเรียน</label><input id="eo-sec" type="text" value="' + esc(o.section) + '">' +
+          '<label for="eo-owner">ครูเจ้าของรายวิชา</label><select id="eo-owner">' + teachers.map(function (t) { return '<option value="' + t.id + '"' + (t.id === o.ownerTeacherId ? ' selected' : '') + '>' + esc(t.code) + ' ' + esc(t.name) + '</option>'; }).join('') + '</select>' +
+          '<label for="eo-status">สถานะ</label><select id="eo-status"><option value="open">เปิดสอน</option><option value="draft"' + (o.status === 'draft' ? ' selected' : '') + '>ฉบับร่าง (นักเรียนยังไม่เห็น)</option><option value="archived"' + (o.status === 'archived' ? ' selected' : '') + '>เก็บถาวร</option></select>' +
+          '<label for="eo-calc">วิธีคำนวณ</label><select id="eo-calc"><option value="per_item">น้ำหนักรายรายการ</option><option value="per_category"' + (o.calcMethod === 'per_category' ? ' selected' : '') + '>น้ำหนักรายหมวด</option></select>' +
+          '<div id="eo-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" data-close>ยกเลิก</button></p></form>');
+        q('#eo').addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          api('offering.save', { id: o.offeringId, version: o.version, sectionCode: q('#eo-sec').value, ownerTeacherId: q('#eo-owner').value, status: q('#eo-status').value, calcMethod: q('#eo-calc').value })
+            .then(function () { document.getElementById('modal').close(); toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#eo-msg').innerHTML = errBox(err); });
+        });
+      });
+      var courseForm = function (c) {
+        var v = c || {};
+        C.openModal('<h2 id="modal-title" style="margin-top:0">' + (c ? 'แก้ไขรายวิชา' : 'เพิ่มรายวิชาในหลักสูตร') + '</h2><form id="cf">' +
+          '<div class="row"><div><label for="cf-code">รหัสวิชา</label><input id="cf-code" type="text" maxlength="30" value="' + esc(v.code || '') + '"></div><div><label for="cf-name">ชื่อวิชา</label><input id="cf-name" type="text" maxlength="200" value="' + esc(v.nameTh || '') + '"></div></div>' +
+          '<div class="row"><div><label for="cf-area">กลุ่มสาระ</label><input id="cf-area" type="text" value="' + esc(v.learningArea || '') + '"></div><div><label for="cf-level">ระดับชั้น</label><input id="cf-level" type="text" value="' + esc(v.gradeLevel || '') + '"></div>' +
+          '<div><label for="cf-credit">หน่วยกิต</label><input id="cf-credit" type="number" step="0.5" min="0" value="' + esc(v.credits || '') + '"></div></div>' +
+          '<label for="cf-desc">คำอธิบายรายวิชา</label><textarea id="cf-desc">' + esc(v.description || '') + '</textarea>' +
+          '<div id="cf-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" data-close>ยกเลิก</button></p></form>');
+        q('#cf').addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          api('course.save', { id: c ? c.id : undefined, version: c ? c.version : undefined, code: q('#cf-code').value, nameTh: q('#cf-name').value, learningArea: q('#cf-area').value, gradeLevel: q('#cf-level').value, credits: q('#cf-credit').value, description: q('#cf-desc').value })
+            .then(function () { document.getElementById('modal').close(); toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#cf-msg').innerHTML = errBox(err); });
+        });
+      };
+      on('#c-add', 'click', function () { courseForm(null); });
+      on('[data-edit-c]', 'click', function (e) { courseForm(catalog.filter(function (c) { return c.id === e.currentTarget.getAttribute('data-edit-c'); })[0]); });
+    });
+  };
+
+  // ======================= ผู้ดูแล: คำขอลงทะเบียน =======================
+  views.adminRegistrations = function (p) {
+    p = p || {};
+    return Promise.all([api('admin.registrations', { status: p.status || 'pending' }), api('admin.status')]).then(function (r) {
+      var list = r[0], st = r[1].settings;
+      h(backBtn() + '<h1>คำขอลงทะเบียนของนักเรียน</h1>' +
+        '<form class="card" id="rs"><h2 style="margin-top:0">การสมัครใช้งานด้วยตนเอง</h2>' +
+        '<label class="check"><input id="rs-on" type="checkbox"' + (st.self_registration_enabled ? ' checked' : '') + '> เปิดให้นักเรียนสมัครใช้งานจากหน้าเข้าสู่ระบบ (ทุกคำขอต้องรออนุมัติ)</label>' +
+        '<label for="rs-code">รหัสลงทะเบียน (ไม่บังคับ — ถ้าตั้งไว้ นักเรียนต้องกรอกรหัสนี้)</label><input id="rs-code" type="text" maxlength="50" value="' + esc(st.self_registration_code || '') + '">' +
+        '<div id="rs-msg"></div><p><button class="btn small" type="submit">บันทึก</button></p></form>' +
+        '<label for="rq-status">แสดง</label><select id="rq-status"><option value="pending">รออนุมัติ</option><option value="approved"' + (p.status === 'approved' ? ' selected' : '') + '>อนุมัติแล้ว</option><option value="rejected"' + (p.status === 'rejected' ? ' selected' : '') + '>ปฏิเสธแล้ว</option><option value="all"' + (p.status === 'all' ? ' selected' : '') + '>ทั้งหมด</option></select>' +
+        '<div class="card table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่อ</th><th>ห้อง</th><th class="hide-sm">ส่งเมื่อ</th><th>หมายเหตุ</th><th></th></tr></thead><tbody>' +
+        (list.length ? list.map(function (x) {
+          return '<tr><td>' + esc(x.code) + '</td><td>' + esc(x.name) + '</td><td>' + esc(x.roomLabel) + '</td><td class="hide-sm">' + fmtDate(x.createdAt) + '</td><td class="small">' +
+            (x.existing ? (x.existing.hasAccount ? '<span class="chip bad">รหัสนี้มีบัญชีแล้ว</span>' : 'มีทะเบียนรหัสนี้แล้ว: ' + esc(x.existing.name) + ' (' + esc(x.existing.roomLabel) + ') — อนุมัติแล้วจะผูกบัญชีกับทะเบียนเดิม') : '') + esc(x.reason || '') + '</td>' +
+            '<td>' + (x.status === 'pending' ? '<button class="btn small" data-approve="' + x.id + '">อนุมัติ</button> <button class="btn ghost small" data-reject="' + x.id + '">ปฏิเสธ</button>' : '<span class="chip ' + (x.status === 'approved' ? 'ok' : 'neutral') + '">' + (x.status === 'approved' ? 'อนุมัติแล้ว' : 'ปฏิเสธแล้ว') + '</span>') + '</td></tr>';
+        }).join('') : '<tr><td colspan="6" class="empty">ไม่มีคำขอ</td></tr>') + '</tbody></table></div>');
+      bindBack();
+      q('#rq-status').addEventListener('change', function () { swap('adminRegistrations', { status: q('#rq-status').value }); });
+      q('#rs').addEventListener('submit', function (e) {
+        e.preventDefault();
+        api('admin.updateSettings', { changes: { self_registration_enabled: q('#rs-on').checked, self_registration_code: q('#rs-code').value } }).then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#rs-msg').innerHTML = errBox(err); });
+      });
+      on('[data-approve]', 'click', function (e) { api('admin.decideRegistration', { id: e.currentTarget.getAttribute('data-approve'), approve: true }).then(function () { toast('อนุมัติแล้ว นักเรียนเข้าสู่ระบบด้วยรหัสผ่านที่ตั้งไว้ได้'); render(); }).catch(function (err) { toast(err.message); }); });
+      on('[data-reject]', 'click', function (e) {
+        var reason = prompt('เหตุผลที่ปฏิเสธ (ไม่บังคับ)');
+        if (reason === null) return;
+        api('admin.decideRegistration', { id: e.currentTarget.getAttribute('data-reject'), approve: false, reason: reason }).then(function () { toast('ปฏิเสธแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+    });
+  };
+})(window.CWK);
+</script>

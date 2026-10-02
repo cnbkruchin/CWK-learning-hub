@@ -115,6 +115,8 @@
   // ======================= นำทาง =======================
   var views = {};
   function go(name, params) { state.stack.push({ name: name, params: params || {} }); render(); }
+  /** แทนหน้าบนสุด (ใช้กับแท็บในหน้าเดียวกัน ไม่ให้ปุ่มย้อนกลับต้องกดหลายครั้ง) */
+  function swap(name, params) { state.stack[state.stack.length - 1] = { name: name, params: params || {} }; render(); }
   function back() { if (state.stack.length > 1) state.stack.pop(); render(); }
   function home() { state.stack = [{ name: homeView() }]; render(); }
   function homeView() {
@@ -178,7 +180,13 @@
       '<div id="login-msg"></div>' +
       '<p><button class="btn" type="submit" style="width:100%">เข้าสู่ระบบ</button></p>' +
       '<p class="muted small">ลืมรหัสผ่าน กรุณาติดต่อครูหรือผู้ดูแลระบบของโรงเรียน</p>' +
+      '<p id="reg-link" class="small" hidden>นักเรียนยังไม่มีบัญชี? <button class="btn ghost small" type="button" id="btn-register">สมัครใช้งาน</button></p>' +
       '</form></div>');
+    api('auth.registrationInfo', {}).then(function (info) {
+      if (!info || !info.enabled || !q('#reg-link')) return;
+      q('#reg-link').hidden = false;
+      on('#btn-register', 'click', function () { go('register', { needsCode: info.needsCode }); });
+    }).catch(function () { /* ไม่แสดงลิงก์ */ });
     q('#login-form').addEventListener('submit', function (e) {
       e.preventDefault();
       var btn = q('#login-form button'); btn.disabled = true;
@@ -231,13 +239,23 @@
   // ======================= นักเรียน =======================
   views.studentHome = function () {
     return api('student.courses').then(function (courses) {
-      h('<h1>รายวิชาของฉัน</h1>' + (courses.length ? '<div class="grid">' + courses.map(function (c) {
+      h('<h1>รายวิชาของฉัน</h1>' +
+        '<form class="card" id="join-form"><label for="join-code" style="margin-top:0">ลงทะเบียนเรียนด้วยรหัสเข้าร่วมรายวิชา (ขอรหัสจากครู)</label>' +
+        '<div class="row"><input id="join-code" type="text" maxlength="20" autocapitalize="characters" placeholder="เช่น AB3K9Q"><button class="btn" type="submit" style="flex:0 0 auto">ลงทะเบียน</button></div><div id="join-msg"></div></form>' +
+        (courses.length ? '<div class="grid">' + courses.map(function (c) {
         return '<div class="card clickable" data-off="' + esc(c.offeringId) + '" tabindex="0" role="button">' +
           '<div class="small muted">ปี ' + esc(c.yearBe) + ' ภาค ' + esc(c.termNo) + '</div>' +
           '<h3>' + esc(c.courseCode) + ' ' + esc(c.courseName) + '</h3>' +
           '<div class="small">กลุ่มเรียน ' + esc(c.section) + ' · ' + esc(c.teacherName) + '</div>' +
           (c.enrollmentStatus !== 'active' ? '<div class="chip neutral">สิ้นสุดการลงทะเบียน</div>' : '') + '</div>';
       }).join('') + '</div>' : '<div class="card empty">ยังไม่มีรายวิชา</div>'));
+      q('#join-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        api('student.join', { code: q('#join-code').value }).then(function (r) {
+          toast(r.already ? 'คุณลงทะเบียนรายวิชานี้อยู่แล้ว' : 'ลงทะเบียนรายวิชา ' + r.courseName + ' แล้ว');
+          render();
+        }).catch(function (err) { q('#join-msg').innerHTML = errBox(err); });
+      });
       qa('[data-off]').forEach(function (el) {
         var open = function () { go('studentCourse', { offeringId: el.getAttribute('data-off'), title: el.querySelector('h3').textContent }); };
         el.addEventListener('click', open);
@@ -246,9 +264,17 @@
     });
   };
 
+  function studentTabs(p, active) {
+    var tabs = [['studentCourse', 'งาน'], ['studentGroups', 'กลุ่มของฉัน'], ['studentGrades', 'คะแนนของฉัน']];
+    return '<nav class="tabs" aria-label="เมนูรายวิชา">' + tabs.map(function (t) {
+      return '<button class="tab' + (t[0] === active ? ' active' : '') + '" data-tab="' + t[0] + '"' + (t[0] === active ? ' aria-current="page"' : '') + '>' + t[1] + '</button>';
+    }).join('') + '</nav>';
+  }
+  function bindTabs(p) { on('[data-tab]', 'click', function (e) { swap(e.currentTarget.getAttribute('data-tab'), p); }); }
+
   views.studentCourse = function (p) {
     return api('student.assessments', { offeringId: p.offeringId }).then(function (items) {
-      h(backBtn() + '<h1>' + esc(p.title) + '</h1>' +
+      h(backBtn() + '<h1>' + esc(p.title) + '</h1>' + studentTabs(p, 'studentCourse') +
         '<p><button class="btn ghost small" id="my-folder">📁 แฟ้มงานของฉัน</button></p>' +
         '<div class="card">' + (items.length ? '<ul class="list">' + items.map(function (a) {
           return '<li class="clickable" data-a="' + esc(a.id) + '" tabindex="0" role="button"><div><strong>' + esc(a.code) + ' ' + esc(a.title) + '</strong>' +
@@ -257,7 +283,7 @@
             (a.dueAt ? '<div class="small">กำหนดส่ง ' + fmtDate(a.dueAt) + (a.extended ? ' (ขยายเวลาแล้ว)' : '') + '</div>' : '') + '</div>' +
             '<div>' + chip(a.status, a.statusLabel, a.overdue) + (a.publishedScore !== null && a.publishedScore !== undefined ? '<div class="small">คะแนน ' + esc(a.publishedScore) + '/' + esc(a.maxScore) + '</div>' : '') + '</div></li>';
         }).join('') + '</ul>' : '<div class="empty">ยังไม่มีงานที่ครูประกาศ</div>') + '</div>');
-      bindBack();
+      bindBack(); bindTabs(p);
       on('#my-folder', 'click', function () { go('studentFolder', { offeringId: p.offeringId }); });
       qa('[data-a]').forEach(function (el) {
         var open = function () { go('studentAssessment', { assessmentId: el.getAttribute('data-a') }); };
@@ -469,6 +495,21 @@
     var panel = q('#group-panel');
     api('group.forStudent', { assessmentId: assessmentId }).then(function (g) {
       var s = g.settings;
+      if (s.source === 'work_groups') {
+        var mgw = g.myGroup;
+        panel.innerHTML = '<h2 style="margin-top:0">กลุ่ม</h2><p class="small muted">งานนี้ใช้กลุ่มประจำรายวิชา (กลุ่มเดิมทำได้หลายงาน)' +
+          (s.minSize ? ' · สมาชิก ' + (s.minSize === s.maxSize ? s.minSize : s.minSize + '–' + s.maxSize) + ' คน' : '') + '</p>' +
+          (mgw ? '<p><strong>' + esc(mgw.name) + '</strong> ' + chip(mgw.frozen ? 'accepted' : 'draft', mgw.statusLabel) + '</p><ul>' +
+            mgw.members.map(function (m) { return '<li>' + esc(m.name) + ' (ห้อง ' + esc(m.room) + ')' + (m.isLeader ? ' — หัวหน้ากลุ่ม' : '') + '</li>'; }).join('') + '</ul>' +
+            (mgw.frozen ? '<p class="small muted">รายชื่อของงานนี้ถูกตรึงแล้ว การเปลี่ยนกลุ่มประจำรายวิชาภายหลังไม่มีผลกับงานนี้</p>' : '')
+            : '<div class="notice warn">คุณยังไม่มีกลุ่มประจำรายวิชา ต้องเข้ากลุ่มก่อนส่งงาน</div>') +
+          '<p><button class="btn ghost small" id="go-groups">ไปหน้า "กลุ่มของฉัน"</button></p>';
+        on('#go-groups', 'click', function () {
+          var prev = state.stack[state.stack.length - 2];
+          if (prev && prev.name === 'studentCourse') { state.stack.pop(); swap('studentGroups', prev.params); }
+        }, panel);
+        return;
+      }
       var html = '<h2 style="margin-top:0">กลุ่ม</h2><p class="small muted">สมาชิก ' + (s.minSize === s.maxSize ? s.minSize : s.minSize + '–' + s.maxSize) + ' คน' +
         (s.formationCloseAt ? ' · ปิดจัดกลุ่ม ' + fmtDate(s.formationCloseAt) : '') + (s.requireApproval ? ' · ครูต้องอนุมัติกลุ่ม' : '') + '</p>';
       if (g.myGroup) {
@@ -574,6 +615,8 @@
     if (!d.open) d.showModal();
   }
   document.getElementById('modal').addEventListener('close', function () {
+    // เหตุการณ์ close มาแบบ async: ถ้ามีการเปิดหน้าต่างใหม่ต่อทันที (เช่น แสดงรหัสผ่านชั่วคราว) ต้องไม่ล้างเนื้อหาใหม่
+    if (document.getElementById('modal').open) return;
     if (modalCleanup) { modalCleanup(); modalCleanup = null; }
     q('#modal-body').innerHTML = '';
   });
@@ -581,10 +624,11 @@
   // ======================= ครู =======================
   views.teacherHome = function () {
     return api('teacher.offerings').then(function (list) {
-      h('<h1>รายวิชาที่สอน</h1>' + (list.length ? '<div class="grid">' + list.map(function (o) {
+      h('<h1>รายวิชาที่สอน</h1><p><button class="btn" id="btn-new-off">+ เพิ่มรายวิชาที่สอน</button></p>' + (list.length ? '<div class="grid">' + list.map(function (o) {
         return '<div class="card clickable" data-off="' + esc(o.offeringId) + '" tabindex="0" role="button"><div class="small muted">ปี ' + esc(o.yearBe) + ' ภาค ' + esc(o.termNo) + (o.isOwner ? ' · ครูเจ้าของรายวิชา' : ' · ครูร่วมสอน') + '</div>' +
           '<h3>' + esc(o.courseCode) + ' ' + esc(o.courseName) + '</h3><div class="small">กลุ่มเรียน ' + esc(o.section) + ' · นักเรียน ' + o.students + ' คน</div></div>';
       }).join('') + '</div>' : '<div class="card empty">ยังไม่มีรายวิชาที่ได้รับมอบหมาย</div>'));
+      on('#btn-new-off', 'click', function () { go('offeringForm', {}); });
       qa('[data-off]').forEach(function (el) {
         var open = function () { go('teacherOffering', { offeringId: el.getAttribute('data-off') }); };
         el.addEventListener('click', open);
@@ -597,12 +641,14 @@
     return api('teacher.assessments', { offeringId: p.offeringId }).then(function (d) {
       var path = d.offering.path;
       h(backBtn() + '<div class="breadcrumb">ปี ' + esc(path.yearBe) + ' / ภาคเรียนที่ ' + esc(path.termNo) + '</div><h1>' + esc(path.offering) + '</h1>' +
+        offeringTabs(p, 'teacherOffering', d.perms) +
         (d.perms.can_manage ? '<p><button class="btn" id="btn-new">+ สร้างภาระงาน</button></p>' : '') +
         '<div class="card table-wrap"><table><thead><tr><th>รหัส</th><th>ชื่องาน</th><th class="hide-sm">ประเภท</th><th>กำหนดส่ง</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
         (d.items.length ? d.items.map(function (a) {
           return '<tr><td>' + esc(a.code) + '</td><td>' + esc(a.title) + '<div class="small muted">เต็ม ' + esc(a.maxScore) + ' · น้ำหนัก ' + esc(a.weight || 0) + '</div></td><td class="hide-sm">' + KIND[a.kind] + '</td>' +
             '<td>' + fmtDate(a.dueAt) + '</td><td>' + (a.status === 'published' ? '<span class="chip ok">เผยแพร่</span>' : '<span class="chip neutral">ฉบับร่าง</span>') + '</td><td>' +
             (a.submissionMode !== 'none' ? '<button class="btn small" data-queue="' + a.id + '">ตรวจงาน</button> ' : '') +
+            (d.perms.can_grade ? '<button class="btn small" data-grade="' + a.id + '" data-kind="' + a.kind + '">ให้คะแนน</button> ' : '') +
             (a.kind === 'group' ? '<button class="btn ghost small" data-groups="' + a.id + '">กลุ่ม</button> ' : '') +
             (d.perms.can_manage ? '<button class="btn ghost small" data-edit="' + a.id + '">แก้ไข</button>' : '') + '</td></tr>';
         }).join('') : '<tr><td colspan="6" class="empty">ยังไม่มีภาระงาน</td></tr>') + '</tbody></table></div>');
@@ -614,8 +660,22 @@
       });
       on('[data-queue]', 'click', function (e) { go('teacherQueue', { assessmentId: e.currentTarget.getAttribute('data-queue'), offeringId: p.offeringId }); });
       on('[data-groups]', 'click', function (e) { go('teacherGroups', { assessmentId: e.currentTarget.getAttribute('data-groups') }); });
+      on('[data-grade]', 'click', function (e) {
+        var id = e.currentTarget.getAttribute('data-grade');
+        go(e.currentTarget.getAttribute('data-kind') === 'group' ? 'groupGrading' : 'gradeEntry', { assessmentId: id, offeringId: p.offeringId });
+      });
+      bindOfferingTabs(p);
     });
   };
+
+  function offeringTabs(p, active, perms) {
+    var tabs = [['teacherOffering', 'ภาระงาน'], ['offeringRoster', 'นักเรียน'], ['workGroups', 'กลุ่มประจำรายวิชา'], ['gradebook', 'สมุดคะแนน']];
+    if (!perms || perms.can_export) tabs.push(['offeringReports', 'รายงาน']);
+    return '<nav class="tabs" aria-label="เมนูรายวิชา">' + tabs.map(function (t) {
+      return '<button class="tab' + (t[0] === active ? ' active' : '') + '" data-otab="' + t[0] + '"' + (t[0] === active ? ' aria-current="page"' : '') + '>' + t[1] + '</button>';
+    }).join('') + '</nav>';
+  }
+  function bindOfferingTabs(p) { on('[data-otab]', 'click', function (e) { swap(e.currentTarget.getAttribute('data-otab'), { offeringId: p.offeringId }); }); }
 
   views.assessmentForm = function (p) {
     var a = p.item || { kind: 'individual', countsTowardGrade: true, status: 'draft' };
@@ -641,7 +701,10 @@
       '<div><label for="f-mb">ขนาดต่อไฟล์ MB (สูงสุด ' + lim.maxFileMb + ')</label><input id="f-mb" type="number" min="1" max="' + lim.maxFileMb + '" value="' + esc(a.maxFileMb || '') + '"></div>' +
       '<div><label for="f-att">จำนวนครั้งที่ส่งได้ (0 = ไม่จำกัด)</label><input id="f-att" type="number" min="0" value="' + esc(a.maxAttempts || 0) + '"></div></div>' +
       '<label class="check"><input id="f-links" type="checkbox"' + (a.allowLinks ? ' checked' : '') + '> อนุญาตให้แนบลิงก์</label></div>' +
-      '<div id="group-fields"><h3>การจัดกลุ่ม</h3><div class="row"><div><label for="f-min">สมาชิกต่ำสุด</label><input id="f-min" type="number" min="1" value="' + esc(a.group ? a.group.minSize : 2) + '"></div>' +
+      '<div id="group-fields"><h3>การจัดกลุ่ม</h3>' +
+      '<label for="f-gsrc">กลุ่มที่ใช้</label><select id="f-gsrc"><option value="work_groups">ใช้กลุ่มประจำรายวิชา (กลุ่มเดิมทำได้หลายงาน)</option>' +
+      '<option value="self"' + (a.group && a.group.source === 'self' ? ' selected' : '') + '>ให้นักเรียนจัดกลุ่มเฉพาะงานนี้</option></select>' +
+      '<div class="row"><div><label for="f-min">สมาชิกต่ำสุด</label><input id="f-min" type="number" min="1" value="' + esc(a.group ? a.group.minSize : 2) + '"></div>' +
       '<div><label for="f-maxs">สมาชิกสูงสุด</label><input id="f-maxs" type="number" min="1" value="' + esc(a.group ? a.group.maxSize : 3) + '"></div>' +
       '<div><label for="f-gclose">ปิดจัดกลุ่ม</label><input id="f-gclose" type="datetime-local" value="' + isoToLocalInput(a.group && a.group.formationCloseAt) + '"></div></div>' +
       '<label class="check"><input id="f-appr" type="checkbox"' + (a.group && a.group.requireApproval ? ' checked' : '') + '> ครูต้องอนุมัติกลุ่ม</label>' +
@@ -666,7 +729,7 @@
         allowLate: q('#f-late').checked, allowedTypes: qa('[name=f-type]:checked').map(function (x) { return x.value; }).join(','),
         maxFiles: q('#f-files').value, maxFileMb: q('#f-mb').value, maxAttempts: q('#f-att').value || 0, allowLinks: q('#f-links').checked,
         groupSubmitPolicy: q('#f-leader').checked ? 'leader_only' : 'any_member', status: q('#f-status').value,
-        group: { minSize: q('#f-min').value, maxSize: q('#f-maxs').value, formationCloseAt: localInputToIso(q('#f-gclose').value), requireApproval: q('#f-appr').checked }
+        group: { minSize: q('#f-min').value, maxSize: q('#f-maxs').value, formationCloseAt: localInputToIso(q('#f-gclose').value), requireApproval: q('#f-appr').checked, source: q('#f-gsrc').value }
       };
       api('teacher.saveAssessment', payload).then(function () { toast('บันทึกแล้ว'); back(); }).catch(function (err) {
         q('#af-msg').innerHTML = errBox(err); btn.disabled = false;
@@ -716,7 +779,7 @@
         (d.canReview && latest ? '<div class="card"><h3 style="margin-top:0">ตรวจรุ่นที่ ' + latest.versionNo + '</h3>' +
           '<label for="rnote">ข้อความถึงนักเรียน (จำเป็นเมื่อส่งคืนแก้ไข)</label><textarea id="rnote"></textarea>' +
           '<div id="rmsg"></div><p><button class="btn" id="btn-accept">รับรุ่นนี้เพื่อประเมิน</button> <button class="btn ghost" id="btn-return">ส่งคืนแก้ไข</button></p>' +
-          '<p class="small muted">การให้คะแนนและประกาศคะแนนจะอยู่ในสมุดคะแนน (ระยะถัดไป)</p></div>' : '') +
+          '<p class="small muted">ให้คะแนนและประกาศคะแนนได้ที่ปุ่ม "ให้คะแนน" ของงาน หรือแท็บสมุดคะแนน</p></div>' : '') +
         '<h2>รุ่นที่ส่ง</h2>' + versionsHtml(d.versions, true));
       bindBack(); bindFileButtons($main);
       function review(action) {
@@ -734,6 +797,7 @@
       var s = d.settings;
       var groupOpts = d.groups.map(function (g) { return '<option value="' + g.id + '">' + esc(g.name) + ' (' + g.count + ')</option>'; }).join('');
       h(backBtn() + '<h1>การจัดกลุ่ม</h1><p class="small muted">สมาชิก ' + s.minSize + '–' + s.maxSize + ' คน' + (s.formationCloseAt ? ' · ปิดจัดกลุ่ม ' + fmtDate(s.formationCloseAt) : '') + '</p>' +
+        (s.source === 'work_groups' ? '<div class="notice info">งานนี้ใช้กลุ่มประจำรายวิชา ให้เพิ่ม/ย้ายสมาชิกที่แท็บ "กลุ่มประจำรายวิชา" ของรายวิชา (หน้านี้ใช้ปรับเฉพาะกลุ่มที่ตรึงรายชื่อแล้ว เช่น หลังส่งงาน)</div>' : '') +
         (d.incomplete.length ? '<div class="notice warn">กลุ่มที่จำนวนสมาชิกไม่ตรงเงื่อนไข: ' + d.incomplete.map(function (x) { return esc(x.name) + ' (' + x.count + ' คน)'; }).join(', ') + '</div>' : '') +
         (d.ungrouped.length ? '<div class="notice warn">นักเรียนที่ยังไม่มีกลุ่ม ' + d.ungrouped.length + ' คน</div>' : '') +
         '<div class="grid">' + d.groups.map(function (g) {
@@ -776,12 +840,37 @@
 
   // ======================= ผู้ดูแล =======================
   views.adminHome = function () {
+    return Promise.all([api('admin.status'), api('admin.registrations', {}).catch(function () { return []; })]).then(function (r) {
+      var s = r[0], regs = r[1];
+      var tiles = [
+        ['adminStudents', '👩‍🎓 นักเรียน', s.counts.students + ' คน · เพิ่ม/นำเข้า/บัญชี'],
+        ['adminTeachers', '👨‍🏫 ครูและผู้ดูแล', s.counts.teachers + ' คน · บัญชีและสิทธิ์'],
+        ['adminCourses', '📚 รายวิชาและภาคเรียน', s.counts.offerings + ' รายวิชาที่เปิดสอน'],
+        ['adminRegistrations', '📝 คำขอลงทะเบียน', regs.length ? regs.length + ' คำขอรออนุมัติ' : 'ไม่มีคำขอค้าง'],
+        ['adminReports', '📄 รายงาน PDF / Excel', 'แยกตามห้อง หรือแยกตามกลุ่ม'],
+        ['adminSystem', '⚙️ ตั้งค่าระบบและพื้นที่', 'ไฟล์ โควตา การสำรอง']
+      ];
+      h('<h1>ผู้ดูแลระบบ</h1>' +
+        (s.pendingTx ? '<div class="notice bad">มีธุรกรรมค้างรอกู้คืน ระบบจะกู้คืนอัตโนมัติเมื่อมีการบันทึกครั้งถัดไป</div>' : '') +
+        (regs.length ? '<div class="notice warn">มีคำขอลงทะเบียนของนักเรียนรออนุมัติ ' + regs.length + ' รายการ</div>' : '') +
+        '<div class="grid">' + tiles.map(function (t) {
+          return '<div class="card clickable" data-admin="' + t[0] + '" tabindex="0" role="button"><h3 style="margin-top:0">' + t[1] + '</h3><div class="small muted">' + esc(t[2]) + '</div></div>';
+        }).join('') + '</div>');
+      qa('[data-admin]').forEach(function (el) {
+        var open = function () { go(el.getAttribute('data-admin')); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+      });
+    });
+  };
+
+  views.adminSystem = function () {
     return api('admin.status').then(function (s) {
       var pct = s.drive.limit ? (s.drive.used / s.drive.limit * 100) : 0;
       var st = s.settings;
       var allTypes = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'gif', 'docx', 'xlsx', 'pptx', 'txt', 'csv', 'odt', 'ods', 'odp', 'zip', 'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'sb3'];
       function files(k) { var x = s.files[k] || { count: 0, bytes: 0 }; return x.count + ' ไฟล์ (' + fmtBytes(x.bytes) + ')'; }
-      h('<h1>ผู้ดูแลระบบ</h1>' +
+      h(backBtn() + '<h1>ตั้งค่าระบบและพื้นที่</h1>' +
         (s.pendingTx ? '<div class="notice bad">มีธุรกรรมค้างรอกู้คืน ระบบจะกู้คืนอัตโนมัติเมื่อมีการบันทึกครั้งถัดไป</div>' : '') +
         (!s.triggers.length ? '<div class="notice warn">ยังไม่ได้ติดตั้งงานตั้งเวลา (สำรองข้อมูล/ล้างไฟล์) ให้รัน installTriggers ใน Apps Script editor</div>' : '') +
         '<div class="grid"><div class="card"><h3 style="margin-top:0">พื้นที่ Google Drive ของบัญชีระบบ</h3><p>' + fmtBytes(s.drive.used) + ' / ' + (s.drive.limit ? fmtBytes(s.drive.limit) : 'ไม่จำกัด') + ' (' + pct.toFixed(1) + '%)</p>' +
@@ -809,10 +898,20 @@
           allowed_file_types: qa('[name=s-type]:checked').map(function (x) { return x.value; })
         } }).then(function () { toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#sf-msg').innerHTML = errBox(err); });
       });
+      bindBack();
     });
   };
 
-  // ======================= เริ่มต้น =======================
+  // ======================= ส่วนกลางให้ไฟล์หน้าจออื่นใช้ (ui/Manage, ui/Grades) =======================
+  window.CWK = {
+    state: state, views: views, api: api, rawCall: rawCall, h: h, q: q, qa: qa, on: on, esc: esc, toast: toast, errBox: errBox,
+    go: go, swap: swap, back: back, home: home, render: render, backBtn: backBtn, bindBack: bindBack, fmtDate: fmtDate, fmtBytes: fmtBytes,
+    chip: chip, KIND: KIND, openModal: openModal, uuid: uuid, isoToLocalInput: isoToLocalInput, localInputToIso: localInputToIso,
+    offeringTabs: offeringTabs, bindOfferingTabs: bindOfferingTabs, studentTabs: studentTabs, bindTabs: bindTabs, store: store
+  };
+
+  // ======================= เริ่มต้น (หลังโหลดสคริปต์ทุกไฟล์) =======================
+  function start() {
   document.getElementById('btn-home').addEventListener('click', home);
   document.getElementById('btn-logout').addEventListener('click', logout);
   document.getElementById('btn-notify').addEventListener('click', function () { go('notifications'); });
@@ -825,5 +924,8 @@
     state.stack = [{ name: 'login' }];
     render();
   }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else setTimeout(start, 0);
 })();
 </script>

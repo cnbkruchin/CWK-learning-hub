@@ -8,7 +8,7 @@ google.script.run
   .apiCall({ action: 'submission.submit', token: '<session token>', payload: { ... } });
 ```
 
-- ทุก action ยกเว้น `auth.login` / `auth.logout` ต้องมี `token` ที่ยังไม่หมดอายุ
+- ทุก action ยกเว้น `auth.login` / `auth.logout` / `auth.registrationInfo` / `auth.register` ต้องมี `token` ที่ยังไม่หมดอายุ
 - บัญชีที่ต้องเปลี่ยนรหัสผ่านเรียกได้เฉพาะ `auth.me`, `auth.changePassword` จนกว่าจะเปลี่ยน (`PASSWORD_CHANGE_REQUIRED`)
 - สิทธิ์ตรวจภายในบริการทุกครั้ง (ตารางด้านล่างคือสิทธิ์ขั้นต่ำ)
 - เวลาทั้งหมดเป็น ISO 8601 UTC; ช่องที่ลงท้าย `Text` เป็นข้อความเวลาไทย ปี พ.ศ.
@@ -23,6 +23,8 @@ google.script.run
 | `auth.changePassword` | ผู้ใช้ | `oldPassword, newPassword` | `token` ใหม่ (session เดิมทั้งหมดถูกเพิกถอน) | `AUTH_INVALID` `VALIDATION` |
 | `notify.list` | ผู้ใช้ | – | แจ้งเตือน 50 รายการล่าสุดของตน | |
 | `notify.markRead` | ผู้ใช้ | `ids[]` | `true` | |
+| `auth.registrationInfo` | ทุกคน | `schoolCode?` | `enabled, needsCode, schoolName` | |
+| `auth.register` | ทุกคน | `studentCode, prefix, firstName, lastName, classLevel, room, rollNo, password, registrationCode?` | `status: 'pending'` (ต้องรอผู้ดูแลอนุมัติ) | `REGISTRATION_CLOSED` `VALIDATION` (รหัสลงทะเบียน/รหัสผ่าน) `DUPLICATE` (มีบัญชีหรือคำขอค้าง) `BUSY` (จำกัดความถี่) |
 
 ## นักเรียน: รายวิชา งาน และการส่ง
 
@@ -39,6 +41,8 @@ google.script.run
 | `submission.copyToDraft` | `assessmentId, versionId` | `added` | `FILE_COUNT_EXCEEDED` |
 | `submission.submit` | `assessmentId, baseVersionNo, idempotencyKey, fileAssetIds?, comment?, links?` | ใบยืนยัน `receiptCode, versionNo, submittedAt(+Text), isLate, files[], links[], replayed?` | `CONFLICT` (details.currentVersionNo) `ATTEMPTS_EXCEEDED` `NOTHING_TO_SUBMIT` `FILE_NOT_READY` `GROUP_SIZE_INVALID` `GROUP_NOT_APPROVED` `GROUP_LEADER_ONLY` `SUBMISSION_CLOSED` |
 | `submission.detail` | `submissionId` | รุ่นที่ตนมีสิทธิ์เห็น | `FORBIDDEN` |
+| `student.join` | `code` | ลงทะเบียนเรียนเองด้วยรหัสเข้าร่วม → `offeringId, already, courseName` | `JOIN_CODE_INVALID` `FORBIDDEN` (ครูเคยถอนออก) |
+| `student.grades` | `offeringId` | คะแนนของฉัน (เฉพาะค่าที่ประกาศ) + คะแนนสะสม/ผลรวม + เกรดเมื่อครบ | `NOT_ENROLLED` |
 
 ## นักเรียน: กลุ่ม
 
@@ -51,6 +55,21 @@ google.script.run
 | `group.requestJoin` | `assessmentId, groupId` | `GROUP_FULL` |
 | `group.decideRequest` | `membershipId, approve` | สมาชิกกลุ่มนั้นเท่านั้น |
 | `group.leave` | `assessmentId` | `GROUP_FROZEN`; หัวหน้าออก → เลือกหัวหน้าใหม่; ไม่มีสมาชิก → ยุบกลุ่ม |
+
+`group.*` ใช้กับงานที่ "ให้นักเรียนจัดกลุ่มเฉพาะงานนี้" เท่านั้น งานที่ใช้กลุ่มประจำรายวิชาตอบ `VALIDATION` และให้จัดการที่ `wg.*`
+
+## นักเรียน: กลุ่มประจำรายวิชา (กลุ่มเดิมทำงานได้หลายงาน)
+
+| action | payload | หมายเหตุ |
+| --- | --- | --- |
+| `wg.mine` | `offeringId` | กลุ่มของฉัน (ชื่อ/ห้องของสมาชิก) คำเชิญ เพื่อนที่ยังไม่มีกลุ่ม กลุ่มอื่น (ชื่อ/จำนวน) งานกลุ่มที่ใช้กลุ่มนี้ |
+| `wg.create` | `offeringId, name` | ผู้สร้างเป็นหัวหน้ากลุ่ม; `GROUP_ALREADY_MEMBER` `GROUPS_LOCKED` `DUPLICATE` |
+| `wg.invite` | `offeringId, studentIds[]` | หัวหน้ากลุ่มเท่านั้น; ค่าเริ่มต้นส่งคำเชิญ (เพื่อนต้องตอบรับ) หรือเพิ่มทันทีเมื่อครูเปิด `leaderDirectAdd`; `GROUP_FULL` |
+| `wg.respond` | `memberId, accept` | ตอบรับ/ปฏิเสธคำเชิญ; `GROUP_FULL` `GROUP_ALREADY_MEMBER` |
+| `wg.leave` | `offeringId` | หัวหน้าออก → ตั้งหัวหน้าใหม่; ไม่มีสมาชิก → ยุบกลุ่ม |
+| `wg.leaderRemove` | `offeringId, studentId` | หัวหน้านำสมาชิกออกหรือยกเลิกคำเชิญ |
+
+ทุกการเปลี่ยนกลุ่มประจำรายวิชาซิงก์ไปยังกลุ่มของงานที่ใช้กลุ่มประจำรายวิชาและยังไม่ตรึงรายชื่อ ในธุรกรรมเดียวกัน
 
 ## ครู
 
@@ -66,6 +85,54 @@ google.script.run
 | `teacher.groupApprove` | `can_manage` | `groupId, sizeException?, reason?, expectedVersion?` | ข้อยกเว้นจำนวนต้องมีเหตุผล |
 | `teacher.groupAssign` | `can_manage` | `assessmentId, studentId, groupId? / newGroupName?, reason?, confirm?` | กลุ่มถูกตรึงหรือเกินจำนวน → ได้ `needsConfirm` + `impact` ก่อน |
 | `teacher.groupCopy` | `can_manage` | `fromAssessmentId, toAssessmentId` | คัดลอกเฉพาะนักเรียนที่ยังเรียนและยังไม่มีกลุ่ม |
+
+`teacher.saveAssessment` สำหรับงานกลุ่มรับ `group.source`: `work_groups` (ใช้กลุ่มประจำรายวิชา) หรือ `self` (นักเรียนจัดกลุ่มเฉพาะงาน)
+
+## รายวิชา ทะเบียนผู้เรียน และกลุ่มประจำรายวิชา (ครูและผู้ดูแล)
+
+| action | สิทธิ์ | payload | หมายเหตุ |
+| --- | --- | --- | --- |
+| `course.terms` | ครู/ผู้ดูแล | – | ปีการศึกษาและภาคเรียน |
+| `course.catalog` | ครู/ผู้ดูแล | – | รายวิชาในหลักสูตร |
+| `course.save` | ครู/ผู้ดูแล | `id?, version?, code, nameTh, learningArea?, gradeLevel?, credits?, hours?, description?` | ครูแก้ได้เฉพาะวิชาที่ตนสร้าง; `DUPLICATE` |
+| `offering.list` | ครู/ผู้ดูแล | `termId?, includeArchived?` | รายวิชาที่เปิดสอนที่มีสิทธิ์ดู |
+| `offering.save` | ครู (เป็นเจ้าของอัตโนมัติ) / ผู้ดูแล (เลือกครูเจ้าของ) | `id?, version?, courseId, termId, sectionCode, calcMethod, status?, ownerTeacherId?` | สร้างรุ่นนโยบายคะแนน + เกณฑ์เกรดเริ่มต้น; มีคะแนนแล้วเปลี่ยนวิธีคำนวณไม่ได้ |
+| `offering.coTeachers` / `offering.setCoTeacher` | ผู้ดูแลหรือครูเจ้าของ | `offeringId, teacherId, perms{can_*}, revoke?` | สิทธิ์ครูร่วมสอนแยกรายการ |
+| `offering.roster` | `can_view` | `offeringId` | นักเรียนในรายวิชา สถานะลงทะเบียน กลุ่มประจำรายวิชา |
+| `offering.candidates` | `can_manage` | `offeringId, classLevel?, room?, q?` | นักเรียนในทะเบียนที่ยังไม่ได้ลงทะเบียน (รหัส ชื่อ ห้อง) |
+| `offering.enroll` | `can_manage` | `offeringId, studentIds[]` | `added, reactivated, skipped` ไม่สร้างคะแนนย้อนหลัง |
+| `offering.withdraw` | `can_manage` | `offeringId, studentId, reason, status?` | เก็บวันมีผล/ประวัติ และนำออกจากกลุ่มประจำรายวิชา |
+| `offering.setJoin` | `can_manage` | `offeringId, enabled, regenerate?` | รหัสเข้าร่วม 6 ตัว |
+| `registry.students` | ครู/ผู้ดูแล | `classLevel?, room?, status?, q?` | ครูเห็นเฉพาะรหัส ชื่อ ชั้น ห้อง เลขที่; ผู้ดูแลเห็นข้อมูลบัญชีด้วย |
+| `registry.teachers` | ครู/ผู้ดูแล | – | |
+| `wg.overview` | `can_view` | `offeringId` | กลุ่มทั้งหมด สมาชิก คำเชิญ นักเรียนที่ยังไม่มีกลุ่ม งานที่ใช้กลุ่ม |
+| `wg.save` | `can_manage` | `offeringId, id?, name, leaderStudentId?, studentIds?, version?` | สร้าง/เปลี่ยนชื่อ/ตั้งหัวหน้า + ใส่สมาชิก |
+| `wg.addMembers` | `can_manage` | `offeringId, workGroupId, studentIds[]` | ย้ายจากกลุ่มเดิมให้อัตโนมัติ คืน `moved, overMax` |
+| `wg.removeMember` / `wg.disband` | `can_manage` | `offeringId, workGroupId, studentId?` | |
+| `wg.auto` | `can_manage` | `offeringId, size, byRoom?` | สุ่มจัดนักเรียนที่ยังไม่มีกลุ่ม |
+| `wg.settings` | `can_manage` | `offeringId, maxSize, leaderDirectAdd, locked` | |
+
+## สมุดคะแนนและการให้คะแนน
+
+| action | สิทธิ์ | payload | หมายเหตุ |
+| --- | --- | --- | --- |
+| `grades.sheet` | `can_view` | `offeringId` | ตารางนักเรียน × รายการประเมิน + ผลรวม/เกรดจาก `Grading.compute` + สถิติการประกาศ |
+| `grades.save` | `can_grade` (แก้คะแนนที่มีแล้วต้อง `can_edit_scores`) | `assessmentId, entries[{studentId, status, score, reason, expectedVersion}]` | งานเดี่ยว/สอบ/รับคะแนนอย่างเดียว; ทั้งชุดหรือไม่บันทึกเลย; `VALIDATION` (เกิน/ติดลบ/ว่าง/ยกเว้นไม่มีเหตุผล) `CONFLICT` `OFFERING_CLOSED` |
+| `grades.groupSheet` | `can_view` | `assessmentId` | กลุ่ม คะแนนกลุ่ม สมาชิกพร้อมคะแนนรายบุคคลและสถานะ (ได้คะแนนกลุ่ม/ปรับรายคน/ยังไม่ได้รับ) |
+| `grades.saveGroup` | `can_grade` | `assessmentId, groupId, status, score, note?, expectedVersion?, preview?, clearOverrides?: studentId[] \| true` | `preview:true` คืนตัวอย่างก่อน/หลังโดยไม่บันทึก; บันทึกจริง = ตรึงรายชื่อ (ถ้ายัง) + `group_grades` + คะแนนรายบุคคลของสมาชิกทุกคนในธุรกรรมเดียว คนที่ปรับรายคนไว้คงเดิม |
+| `grades.override` | `can_grade` (+`can_edit_scores` เมื่อมีคะแนนแล้ว) | `assessmentId, studentId, status, score, reason, clear?, expectedVersion?` | ปรับรายคนต้องมีเหตุผล; `clear` = กลับไปใช้คะแนนกลุ่ม |
+| `grades.publish` | `can_publish` | `assessmentId, action?(publish/unpublish), reason?` | เรียกคืนต้องมีเหตุผล; แจ้งเตือนไม่มีคะแนนในข้อความ |
+| `grades.history` | `can_view` | `studentGradeId` | ประวัติทุกครั้ง: ค่าก่อน/หลัง ที่มา ผู้แก้ เวลา เหตุผล |
+
+## รายงาน
+
+| action | สิทธิ์ | payload | หมายเหตุ |
+| --- | --- | --- | --- |
+| `report.data` | `can_export` | `kind: offering \| groups \| room`, `offeringId` หรือ `classLevel, room, termId?`, `groupBy?: room \| all` | เอกสารรายงานชุดเดียวที่ใช้แสดงผล/พิมพ์เป็น PDF |
+| `report.xlsx` | `can_export` | เหมือน `report.data` | `fileName, mime, size, base64` ไฟล์ .xlsx จากข้อมูลชุดเดียวกัน |
+
+- `offering` = สมุดคะแนนรายวิชา แยกตามห้อง (หรือรวม) · `groups` = ผลประเมินงานกลุ่ม แยกตามกลุ่ม · `room` = สรุปคะแนนรายห้องทุกรายวิชา
+- รายงานรายห้องรวมเฉพาะรายวิชาที่ผู้ขอมีสิทธิ์ส่งออก (ครูเห็นเฉพาะนักเรียนในรายวิชาของตน ผู้ดูแลเห็นทั้งห้อง)
 
 ## ไฟล์
 
@@ -84,6 +151,14 @@ google.script.run
 | `admin.updateSettings` | `changes{}` | แก้ได้เฉพาะค่าที่กำหนด พร้อมช่วงที่อนุญาต |
 | `admin.resetPassword` | `userId` | คืนรหัสชั่วคราว (แสดงครั้งเดียว) บังคับเปลี่ยน เพิกถอน session |
 | `admin.setUserStatus` | `userId, status(active/disabled), reason` | ข้อมูลงาน/คะแนนเดิมไม่ถูกลบ |
+| `admin.saveStudent` | `id?, version?, studentCode, prefix, firstName, lastName, classLevel, room, rollNo, status, createAccount?` | สร้างบัญชี (ชื่อผู้ใช้ = รหัสนักเรียน) คืนรหัสผ่านชั่วคราวครั้งเดียว |
+| `admin.createStudentAccount` | `studentId` | สร้างบัญชีให้นักเรียนที่ยังไม่มี |
+| `admin.importStudents` | `text, commit?, skipErrors?, createAccounts?` | CSV/TSV (หัวตารางไทย/อังกฤษ) ไม่ commit = หน้าตัวอย่าง (insert/update/skip/error รายแถว + คำเตือนศูนย์นำหน้า); commit ที่มีแถวผิดต้อง `skipErrors`; สูงสุด 500 แถว |
+| `admin.saveTeacher` | `id?, version?, teacherCode, prefix, firstName, lastName, department, status?, username?` | สร้างบัญชีครูพร้อมรหัสชั่วคราว |
+| `admin.setRole` | `userId, role(admin/grade_admin), grant, reason` | `grade_admin` = ผู้ดูแลที่ให้/แก้คะแนนได้ (มีบันทึก) |
+| `admin.staffUsers` | – | ผู้ใช้ที่เป็นผู้ดูแล/ผู้ดูแลคะแนน |
+| `admin.registrations` / `admin.decideRegistration` | `status?` / `id, approve, reason?` | อนุมัติแล้วสร้างบัญชี (ผูกกับทะเบียนเดิมถ้ามี) ไม่ส่ง hash รหัสผ่านให้หน้าเว็บ |
+| `admin.saveYear` / `admin.saveTerm` | `yearBe` (สร้างภาค 1–2 ให้) / `academicYearId, termNo` | |
 
 ## รหัสข้อผิดพลาด
 
@@ -97,6 +172,8 @@ google.script.run
 | `BUSY` | ระบบกำลังบันทึกรายการอื่น ลองใหม่ (หน้าเว็บลองให้อัตโนมัติสำหรับคำสั่งที่ทำซ้ำได้) |
 | `SUBMISSION_*` `ATTEMPTS_EXCEEDED` `NOTHING_TO_SUBMIT` | เงื่อนไขการส่ง |
 | `FILE_*` `UPLOAD_*` `QUOTA_EXCEEDED` | ไฟล์และการอัปโหลด |
-| `GROUP_*` | การจัดกลุ่ม |
+| `GROUP_*` `GROUPS_LOCKED` | การจัดกลุ่ม |
+| `REGISTRATION_CLOSED` `JOIN_CODE_INVALID` | ยังไม่เปิดสมัครใช้งานเอง / รหัสเข้าร่วมรายวิชาไม่ถูกต้อง |
+| `OFFERING_CLOSED` | รายวิชาปิดผลแล้ว แก้คะแนนไม่ได้ |
 | `SETUP_REQUIRED` `DB_SCHEMA_MISMATCH` | ยังไม่ติดตั้ง / โครงสร้างตารางไม่ตรง (รัน `setup`) |
 | `INTERNAL` | ข้อผิดพลาดภายใน แสดงรหัสอ้างอิงให้แจ้งผู้ดูแล (รายละเอียดอยู่ใน log ของ Apps Script) |

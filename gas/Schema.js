@@ -137,6 +137,26 @@ var Schema = (function () {
     ]
   };
 
+  T.registration_requests = {
+    db: 'core', size: 'small', d: 'คำขอลงทะเบียนใช้งานของนักเรียน (สมัครเอง) รอผู้ดูแลอนุมัติก่อนสร้างบัญชี',
+    fields: [
+      R('school_id', 'schools', { req: true }),
+      F('student_code', 'code', { req: true, max: 30 }),
+      F('prefix', 'text', { max: 30 }),
+      F('first_name', 'text', { req: true, max: 100 }),
+      F('last_name', 'text', { max: 100 }),
+      F('class_level', 'text', { max: 20 }),
+      F('room', 'text', { max: 20 }),
+      F('roll_no', 'int'),
+      F('password_hash', 'text', { max: 300, secret: true, d: 'รหัสผ่านที่นักเรียนตั้ง (hash) ย้ายไปบัญชีเมื่ออนุมัติ' }),
+      E('status', ['pending', 'approved', 'rejected'], { def: 'pending' }),
+      R('student_id', 'students', { d: 'ทะเบียนนักเรียนที่สร้าง/ผูกเมื่ออนุมัติ' }),
+      R('decided_by', 'users'),
+      F('decided_at', 'dt'),
+      F('reason', 'text', { max: 500 })
+    ]
+  };
+
   T.academic_years = {
     db: 'core', size: 'small', d: 'ปีการศึกษา (พ.ศ.)',
     unique: [['school_id', 'year_be']],
@@ -197,7 +217,12 @@ var Schema = (function () {
       F('drive_folder_id', 'text', { max: 100, d: 'โฟลเดอร์ไฟล์จริงบน Drive (สร้างอัตโนมัติ)' }),
       F('quota_mb', 'int', { d: 'โควตาไฟล์ของรายวิชา (0 = ใช้ของโรงเรียน)' }),
       F('closed_at', 'dt'),
-      R('closed_by', 'users')
+      R('closed_by', 'users'),
+      F('join_code', 'code', { max: 20, d: 'รหัสเข้าร่วมรายวิชา ให้นักเรียนลงทะเบียนเรียนเอง (ว่าง = ไม่เปิด)' }),
+      F('join_enabled', 'bool', { def: false, d: 'เปิดให้นักเรียนลงทะเบียนเรียนเองด้วยรหัสเข้าร่วม' }),
+      F('group_max_size', 'int', { def: 0, d: 'จำนวนสมาชิกสูงสุดของกลุ่มประจำรายวิชา (0 = ไม่จำกัด)' }),
+      F('leader_direct_add', 'bool', { def: false, d: 'หัวหน้ากลุ่มเพิ่มสมาชิกได้ทันที (ค่าเริ่มต้น: ส่งคำเชิญให้สมาชิกตอบรับ)' }),
+      F('groups_locked', 'bool', { def: false, d: 'ครูล็อกกลุ่มประจำรายวิชา นักเรียนเปลี่ยนสมาชิกไม่ได้' })
     ]
   };
 
@@ -371,7 +396,46 @@ var Schema = (function () {
       F('require_approval', 'bool', { def: false }),
       F('section_restricted', 'bool', { def: true, d: 'สมาชิกต้องอยู่กลุ่มเรียนเดียวกัน' }),
       R('copied_from_set_id', 'assignment_group_sets'),
-      F('all_frozen_at', 'dt', { d: 'เวลาที่ตรึงทุกกลุ่มเมื่อถึงวันปิดจัดกลุ่ม' })
+      F('all_frozen_at', 'dt', { d: 'เวลาที่ตรึงทุกกลุ่มเมื่อถึงวันปิดจัดกลุ่ม' }),
+      E('source', ['self', 'work_groups'], { def: 'self', d: 'self = จัดกลุ่มเฉพาะงานนี้, work_groups = ใช้กลุ่มประจำรายวิชา (กลุ่มเดิมทำได้หลายงาน)' })
+    ]
+  };
+
+  T.work_groups = {
+    db: 'work', size: 'large', idx: ['offering_id'],
+    d: 'กลุ่มประจำรายวิชา (กลุ่มเดิมทำงานกลุ่มได้หลายงาน คะแนนแต่ละงานเก็บที่กลุ่มของงานนั้น)',
+    fields: [
+      R('offering_id', 'course_offerings', { req: true }),
+      F('name', 'text', { req: true, max: 100 }),
+      R('leader_student_id', 'students', { d: 'หัวหน้ากลุ่ม (เลือกสมาชิกเข้ากลุ่มได้)' }),
+      E('status', ['active', 'disbanded'], { def: 'active' }),
+      F('active_count', 'int', { def: 0 }),
+      F('note', 'text', { max: 500 })
+    ]
+  };
+
+  T.work_group_members = {
+    db: 'work', size: 'large', idx: ['work_group_id', 'offering_id', 'student_id'],
+    d: 'สมาชิกกลุ่มประจำรายวิชาและคำเชิญ (หนึ่งคน active ได้หนึ่งกลุ่มต่อรายวิชา)',
+    fields: [
+      R('work_group_id', 'work_groups', { req: true }),
+      R('offering_id', 'course_offerings', { req: true }),
+      R('student_id', 'students', { req: true }),
+      E('status', ['invited', 'active', 'declined', 'left', 'removed', 'cancelled'], { req: true }),
+      R('added_by_user_id', 'users'),
+      F('responded_at', 'dt')
+    ]
+  };
+
+  T.work_group_history = {
+    db: 'work', size: 'large', idx: ['work_group_id'], appendOnly: true, lockFree: true,
+    d: 'ประวัติการเปลี่ยนแปลงกลุ่มประจำรายวิชา',
+    fields: [
+      R('work_group_id', 'work_groups', { req: true }),
+      R('student_id', 'students'),
+      F('action', 'text', { req: true, max: 40, d: 'create rename invite accept decline add remove leave leader disband' }),
+      F('reason', 'text', { max: 500 }),
+      F('detail_json', 'json')
     ]
   };
 
@@ -389,7 +453,8 @@ var Schema = (function () {
       F('size_exception_reason', 'text', { max: 500 }),
       F('frozen_at', 'dt'),
       E('frozen_reason', ['', 'first_submission', 'formation_closed', 'teacher'], { def: '' }),
-      F('snapshot_no', 'int', { def: 0, d: 'รุ่น snapshot สมาชิกปัจจุบัน' })
+      F('snapshot_no', 'int', { def: 0, d: 'รุ่น snapshot สมาชิกปัจจุบัน' }),
+      R('work_group_id', 'work_groups', { d: 'กลุ่มประจำรายวิชาที่เป็นต้นทาง (เมื่องานใช้กลุ่มประจำรายวิชา)' })
     ]
   };
 

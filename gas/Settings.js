@@ -30,7 +30,9 @@ var Settings = {
     quota_warn_percent: function (v) { return Settings._int(v, 50, 99, 'แจ้งเตือนเมื่อใช้พื้นที่ (%)'); },
     session_idle_minutes: function (v) { return Settings._int(v, 5, 24 * 60, 'หมดเวลาเมื่อไม่ใช้งาน (นาที)'); },
     session_absolute_hours: function (v) { return Settings._int(v, 1, 72, 'อายุ session สูงสุด (ชั่วโมง)'); },
-    backup_retention_days: function (v) { return Settings._int(v, 1, 365, 'อายุไฟล์สำรอง (วัน)'); }
+    backup_retention_days: function (v) { return Settings._int(v, 1, 365, 'อายุไฟล์สำรอง (วัน)'); },
+    self_registration_enabled: function (v) { return v === true || v === 'true' || v === 1; },
+    self_registration_code: function (v) { return Util.str(v, 50, 'รหัสลงทะเบียน'); }
   },
 
   _int: function (v, min, max, label) {
@@ -51,8 +53,10 @@ var Settings = {
     return Db.tx('settings.update', function (tx) {
       Object.keys(clean).forEach(function (k) {
         var row = tx.one('settings', { school_id: ctx.schoolId, key: k });
-        if (row) tx.update('settings', row.id, { value_json: clean[k] });
-        else tx.insert('settings', { school_id: ctx.schoolId, key: k, value_json: clean[k] });
+        // ชั้นข้อมูลถือว่าข้อความในคอลัมน์ json เป็น JSON แล้ว จึงแปลงเองเสมอ (ค่าข้อความ เช่น ชื่อระบบ จะได้อ่านกลับได้)
+        var json = JSON.stringify(clean[k]);
+        if (row) tx.update('settings', row.id, { value_json: json });
+        else tx.insert('settings', { school_id: ctx.schoolId, key: k, value_json: json });
       });
       tx.afterCommit(function () { Audit.log(ctx, 'settings.update', 'settings', ctx.schoolId, clean); });
       return Settings.get(ctx.schoolId);

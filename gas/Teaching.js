@@ -46,7 +46,7 @@ var Teaching = {
       openAt: a.open_at, dueAt: a.due_at, closeAt: a.close_at, allowLate: a.allow_late,
       allowedTypes: a.allowed_types, maxFiles: a.max_files, maxFileMb: a.max_file_mb, maxAttempts: a.max_attempts,
       allowLinks: a.allow_links, groupSubmitPolicy: a.group_submit_policy, status: a.status,
-      group: gs ? { minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval } : null
+      group: gs ? { minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval, source: gs.source || 'self' } : null
     };
   },
 
@@ -84,7 +84,11 @@ var Teaching = {
       var g = req.group || {};
       var min = Number(g.minSize), max = Number(g.maxSize);
       if (!(min >= 1) || !(max >= min) || max > 50 || Math.floor(min) !== min || Math.floor(max) !== max) Errors.raise('VALIDATION', 'จำนวนสมาชิกกลุ่มไม่ถูกต้อง');
-      group = { min_size: min, max_size: max, formation_close_at: g.formationCloseAt ? Util.toIso(g.formationCloseAt) : '', require_approval: !!g.requireApproval };
+      var source = g.source === 'work_groups' ? 'work_groups' : 'self';
+      group = {
+        min_size: min, max_size: max, formation_close_at: g.formationCloseAt ? Util.toIso(g.formationCloseAt) : '',
+        require_approval: source === 'self' && !!g.requireApproval, source: source
+      };
     }
     var data = {
       offering_id: auth.offering.id, category_id: req.categoryId || '', code: Util.requireStr(req.code, 'รหัสงาน', 30),
@@ -122,11 +126,16 @@ var Teaching = {
       if (group) {
         if (gs) {
           var biggest = tx.find('groups', { group_set_id: gs.id }).reduce(function (m, x) { return Math.max(m, x.status === 'disbanded' ? 0 : Number(x.active_count || 0)); }, 0);
-          if (biggest > group.max_size) Errors.raise('VALIDATION', 'มีกลุ่มที่มีสมาชิก ' + biggest + ' คน มากกว่าจำนวนสูงสุดใหม่');
+          if (group.source === 'self' && biggest > group.max_size) Errors.raise('VALIDATION', 'มีกลุ่มที่มีสมาชิก ' + biggest + ' คน มากกว่าจำนวนสูงสุดใหม่');
+          if ((gs.source || 'self') !== group.source) {
+            var formed = tx.find('groups', { group_set_id: gs.id }).some(function (x) { return x.status !== 'disbanded' && (x.frozen_at || Number(x.active_count || 0) > 0); });
+            if (formed && group.source === 'work_groups') Errors.raise('VALIDATION', 'นักเรียนจัดกลุ่มเฉพาะงานนี้ไว้แล้ว เปลี่ยนไปใช้กลุ่มประจำรายวิชาไม่ได้');
+          }
           tx.update('assignment_group_sets', gs.id, group);
         } else {
           tx.insert('assignment_group_sets', Object.assign({ offering_id: auth.offering.id, assessment_id: a.id, section_restricted: true }, group));
         }
+        if (group.source === 'work_groups') WorkGroups.syncOffering(tx, auth.offering.id, null, ctx);
       }
       tx.afterCommit(function () { Audit.log(ctx, req.id ? 'assessment.update' : 'assessment.create', 'assessments', a.id, { code: a.code, status: a.status }, '', auth.offering.id); });
       return Teaching.assessmentDto(a, group ? tx.one('assignment_group_sets', { assessment_id: a.id }) : null);

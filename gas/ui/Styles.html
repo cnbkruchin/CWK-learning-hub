@@ -13,6 +13,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 "Sarabun", system-ui, -apple-system, "Segoe UI", sans-serif; }
   button, input, select, textarea { font: inherit; color: inherit; }
   a { color: var(--primary); }
@@ -91,6 +92,63 @@
   .kv dd { margin: 0; }
   .breadcrumb { color: var(--muted); font-size: .9rem; margin-bottom: 4px; }
   pre.text-preview { white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; background: var(--bg); padding: 12px; border-radius: 8px; }
+  /* แท็บในหน้ารายวิชา */
+  .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 2px solid var(--line); margin: 4px 0 16px; scrollbar-width: thin; }
+  .tab { flex: 0 0 auto; min-height: 44px; padding: 8px 14px; border: 0; border-bottom: 3px solid transparent; margin-bottom: -2px; background: transparent; color: var(--muted); font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .tab:hover { color: var(--text); }
+  /* ตารางคะแนน */
+  .grade-table { font-size: .9rem; }
+  .grade-table th, .grade-table td { padding: 6px 8px; white-space: nowrap; }
+  .grade-table th.sticky, .grade-table td.sticky { position: sticky; left: 0; background: var(--card); z-index: 1; }
+  .grade-table thead th.sticky { z-index: 2; }
+  .grade-table td.num, .grade-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .grade-table .cell { cursor: pointer; border-radius: 6px; padding: 2px 6px; display: inline-block; min-width: 2.5em; text-align: right; }
+  .grade-table .cell:hover { background: var(--info-bg); }
+  .grade-table .cell.override { outline: 1px dashed var(--warn); }
+  .grade-table .cell.dirty::after { content: '•'; color: var(--warn); margin-left: 2px; }
+  .table-scroll { overflow: auto; max-height: 70vh; }
+  input.score { width: 6em; min-height: 40px; text-align: right; }
+  select.compact, input.compact { width: auto; min-height: 40px; padding: 4px 8px; }
+  tr.changed td { background: var(--warn-bg); }
+  tr.saved td { background: var(--ok-bg); }
+  /* รายการเลือกหลายคน */
+  .pick-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px; background: var(--bg); }
+  .pick-list label { font-weight: 400; margin: 0; padding: 6px 0; display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }
+  .pick-list label:first-child { border-top: 0; }
+  .pick-list input[type=checkbox] { width: 20px; height: 20px; }
+  .member-list { list-style: none; padding: 0; margin: 8px 0; }
+  .member-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px dashed var(--line); flex-wrap: wrap; }
+  .member-list li:first-child { border-top: 0; }
+  .big-code { font-size: 1.8rem; font-weight: 700; letter-spacing: 4px; font-variant-numeric: tabular-nums; }
+  .stat { display: inline-flex; flex-direction: column; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; margin: 0 8px 8px 0; background: var(--card); }
+  .stat b { font-size: 1.3rem; }
+  .temp-pw { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; letter-spacing: 1px; }
+  /* หน้ารายงาน (PDF จากการพิมพ์ของเบราว์เซอร์) */
+  .report-page { background: #fff; color: #111; border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .report-page h1 { font-size: 1.3rem; margin: 0 0 4px; text-align: center; }
+  .report-page .r-school { text-align: center; font-weight: 700; }
+  .report-page .r-course { text-align: center; margin-bottom: 8px; }
+  .report-page .r-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 16px; font-size: .9rem; margin: 8px 0 12px; }
+  .report-page .r-meta b { font-weight: 600; }
+  .report-page .r-provisional { border: 1px solid #9a5b00; color: #9a5b00; background: #fff3dc; padding: 4px 8px; border-radius: 6px; font-weight: 700; text-align: center; margin: 6px 0; }
+  .report-page h2 { font-size: 1.05rem; margin: 16px 0 6px; break-after: avoid; }
+  .report-page table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .report-page th, .report-page td { border: 1px solid #9aa3b2; padding: 3px 5px; vertical-align: top; color: #111; background: #fff; position: static; }
+  .report-page thead th { background: #e8eef7; }
+  .report-page thead { display: table-header-group; }
+  .report-page tr { break-inside: avoid; }
+  .report-page td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .report-page td.nowrap { white-space: nowrap; }
+  .report-page .r-notes { font-size: .82rem; margin-top: 12px; }
+  .report-page .r-sign { display: flex; justify-content: space-around; margin-top: 36px; font-size: .9rem; text-align: center; break-inside: avoid; }
+  @media print {
+    html, body { background: #fff !important; }
+    .topbar, .demo-banner, .no-print, .skip, .toast { display: none !important; }
+    main { max-width: none; padding: 0; }
+    .report-page { border: 0; padding: 0; }
+    a[href]::after { content: none; }
+  }
   @media (max-width: 600px) {
     main { padding: 12px; }
     .brand small { display: none; }

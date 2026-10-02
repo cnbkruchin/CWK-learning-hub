@@ -1,0 +1,376 @@
+<script>
+/**
+ * หน้าคะแนนและรายงาน: สมุดคะแนน ให้คะแนนรายบุคคล ให้คะแนนกลุ่ม (กระจายให้สมาชิกอัตโนมัติ) คะแนนของฉัน รายงาน PDF/Excel
+ * ค่าคะแนน ผลรวม และเกรดทั้งหมดมาจากเซิร์ฟเวอร์ (โมดูลคำนวณเดียว) หน้าเว็บไม่คำนวณเอง
+ */
+(function (C) {
+  'use strict';
+  var views = C.views, api = C.api, h = C.h, q = C.q, qa = C.qa, on = C.on, esc = C.esc, toast = C.toast, errBox = C.errBox;
+  var go = C.go, render = C.render, backBtn = C.backBtn, bindBack = C.bindBack, fmtDate = C.fmtDate;
+  var STATUS = { scored: 'มีคะแนน', missing: 'ยังไม่ส่ง/ขาดสอบ', excused: 'ยกเว้น', needs_revision: 'รอแก้ไข', not_assessed: 'ยังไม่ประเมิน' };
+  var SHORT = { missing: 'ขส', excused: 'ยว', needs_revision: 'รอแก้', not_assessed: '–' };
+  var METHOD = { per_item: 'น้ำหนักรายรายการ', per_category: 'น้ำหนักรายหมวด' };
+
+  function cellText(c) { return c.status === 'scored' ? esc(c.score) : esc(SHORT[c.status] || '–'); }
+  function totalText(t) {
+    if (t.status === 'complete') return '<strong>' + esc(t.final) + '</strong>';
+    if (t.status === 'incomplete') return esc(t.provisional) + ' <span class="small muted">สะสม</span>';
+    return '<span class="small muted">ไม่มีฐานคะแนน</span>';
+  }
+  function statusOptions(cur, withClear) {
+    return Object.keys(STATUS).filter(function (k) { return withClear || k !== 'not_assessed'; }).map(function (k) {
+      return '<option value="' + k + '"' + (cur === k ? ' selected' : '') + '>' + STATUS[k] + (k === 'not_assessed' ? ' (ล้างคะแนน)' : '') + '</option>';
+    }).join('');
+  }
+  function publishBar(a, unpublished, perms) {
+    if (!perms.can_publish) return unpublished ? '<div class="notice warn small">มีคะแนนที่ยังไม่ประกาศ ' + unpublished + ' รายการ (ต้องให้ผู้มีสิทธิ์ประกาศ)</div>' : '';
+    return '<div class="card"><strong>การประกาศคะแนน</strong> · ' + (unpublished ? '<span class="chip warn">ยังไม่ประกาศ/มีการแก้ ' + unpublished + ' รายการ</span>' : '<span class="chip ok">นักเรียนเห็นคะแนนล่าสุดแล้ว</span>') +
+      '<p class="small muted">นักเรียนเห็นเฉพาะคะแนนที่ประกาศ การแก้คะแนนหลังประกาศต้องประกาศอีกครั้งจึงจะเห็นค่าใหม่</p>' +
+      '<p><button class="btn small" id="btn-publish"' + (unpublished ? '' : ' disabled') + '>ประกาศคะแนนงานนี้</button> <button class="btn ghost small" id="btn-unpublish">เรียกคืนการประกาศ</button></p></div>';
+  }
+  function bindPublish(assessmentId) {
+    on('#btn-publish', 'click', function () {
+      if (!confirm('ประกาศคะแนนให้นักเรียนเห็น?')) return;
+      api('grades.publish', { assessmentId: assessmentId }).then(function (r) { toast('ประกาศแล้ว ' + r.changed + ' รายการ'); render(); }).catch(function (err) { toast(err.message); });
+    });
+    on('#btn-unpublish', 'click', function () {
+      var reason = prompt('เหตุผลที่เรียกคืนการประกาศ');
+      if (!reason) return;
+      api('grades.publish', { assessmentId: assessmentId, action: 'unpublish', reason: reason }).then(function (r) { toast('เรียกคืนแล้ว ' + r.changed + ' รายการ'); render(); }).catch(function (err) { toast(err.message); });
+    });
+  }
+  function showHistory(studentGradeId, title) {
+    api('grades.history', { studentGradeId: studentGradeId }).then(function (list) {
+      C.openModal('<h2 id="modal-title" style="margin-top:0">ที่มาและประวัติคะแนน</h2><p>' + esc(title) + '</p>' +
+        '<div class="table-wrap"><table><thead><tr><th>ครั้งที่</th><th>เวลา</th><th>จาก</th><th>เป็น</th><th>ที่มา</th><th>ผู้แก้</th><th>เหตุผล</th></tr></thead><tbody>' +
+        list.map(function (r) {
+          var f = r.fromStatus === 'scored' ? r.fromScore : (STATUS[r.fromStatus] || '–');
+          var t = r.toStatus === 'scored' ? r.toScore : (STATUS[r.toStatus] || '–');
+          return '<tr><td>' + r.revisionNo + '</td><td class="small">' + fmtDate(r.at) + '</td><td>' + esc(f) + '</td><td>' + esc(t) + '</td><td>' + esc(r.sourceLabel) + '</td><td class="small">' + esc(r.by) + '</td><td class="small">' + esc(r.reason) + '</td></tr>';
+        }).join('') + '</tbody></table></div><p><button class="btn ghost" data-close>ปิด</button></p>');
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  // ======================= สมุดคะแนน (ครู/ผู้ดูแล) =======================
+  views.gradebook = function (p) {
+    return api('grades.sheet', { offeringId: p.offeringId }).then(function (d) {
+      var o = d.offering, as = d.assessments, perms = d.perms;
+      var active = d.students.filter(function (s) { return s.enrollmentStatus === 'active'; });
+      h(backBtn() + C.offeringHeader(o) + C.offeringTabs(p, 'gradebook', perms) +
+        '<p class="small muted">วิธีคำนวณ: ' + esc(METHOD[d.policy.method] || d.policy.method) + ' · ปัดครั้งเดียวตอนสรุป ' + d.policy.digits + ' ตำแหน่ง · ' +
+        'ขส = ยังไม่ส่ง/ขาดสอบ · ยว = ยกเว้น · – = ยังไม่ประเมิน (ไม่ใช่ศูนย์) · เส้นประ = ปรับรายคนจากคะแนนกลุ่ม · • = ยังไม่ประกาศ · คลิกคะแนนเพื่อดูที่มา</p>' +
+        (as.length ? '' : '<div class="notice info">ยังไม่มีรายการประเมิน สร้างได้ที่แท็บ "ภาระงาน"</div>') +
+        '<div class="card table-scroll"><table class="grade-table"><thead><tr><th>ที่</th><th class="sticky">ชื่อ - สกุล</th><th class="hide-sm">ห้อง</th>' +
+        as.map(function (a) {
+          return '<th class="num">' + esc(a.code) + (a.kind === 'group' ? ' 👥' : '') + '<div class="small muted">เต็ม ' + esc(a.maxScore) + (a.countsTowardGrade ? ' · น. ' + esc(a.weight) : ' · ไม่นับ') + '</div>' +
+            (perms.can_grade ? '<button class="btn ghost small" data-grade="' + a.id + '" data-kind="' + a.kind + '">ให้คะแนน</button>' : '') +
+            (a.stats.unpublished ? '<div><span class="chip warn small">ยังไม่ประกาศ ' + a.stats.unpublished + '</span></div>' : '') + '</th>';
+        }).join('') + '<th class="num">รวม (100)</th><th>เกรด</th></tr></thead><tbody>' +
+        (d.students.length ? d.students.map(function (s, i) {
+          return '<tr' + (s.enrollmentStatus !== 'active' ? ' class="muted"' : '') + '><td>' + (i + 1) + '</td><td class="sticky">' + esc(s.code) + ' ' + esc(s.name) +
+            (s.enrollmentStatus !== 'active' ? ' <span class="chip neutral">ถอน/ย้าย</span>' : '') + '</td><td class="hide-sm">' + esc(s.roomLabel) + '</td>' +
+            as.map(function (a) {
+              var c = s.cells[a.id];
+              return '<td class="num"><span class="cell' + (c.isOverride ? ' override' : '') + (c.dirty ? ' dirty' : '') + '" ' + (c.id ? 'data-hist="' + c.id + '" tabindex="0" role="button"' : '') +
+                ' title="' + esc((STATUS[c.status] || '') + (c.groupName ? ' · กลุ่ม ' + c.groupName : '') + (c.isOverride ? ' · ปรับรายคน: ' + (c.overrideReason || '') : '')) + '" data-title="' + esc(s.name + ' · ' + a.code) + '">' + cellText(c) + '</span></td>';
+            }).join('') +
+            '<td class="num">' + totalText(s.total) + '</td><td>' + (s.total.grade ? esc(s.total.grade.label) : '') + '</td></tr>';
+        }).join('') : '<tr><td colspan="' + (as.length + 5) + '" class="empty">ยังไม่มีนักเรียน</td></tr>') + '</tbody></table></div>' +
+        '<p class="small muted">นักเรียนที่กำลังเรียน ' + active.length + ' คน · ครบทุกรายการ ' + active.filter(function (s) { return s.total.status === 'complete'; }).length + ' คน</p>');
+      bindBack(); C.bindOfferingTabs(p);
+      on('[data-grade]', 'click', function (e) {
+        go(e.currentTarget.getAttribute('data-kind') === 'group' ? 'groupGrading' : 'gradeEntry', { assessmentId: e.currentTarget.getAttribute('data-grade'), offeringId: p.offeringId });
+      });
+      qa('[data-hist]').forEach(function (el) {
+        var open = function () { showHistory(el.getAttribute('data-hist'), el.getAttribute('data-title')); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
+      });
+    });
+  };
+
+  // ======================= ให้คะแนนรายบุคคล (งานเดี่ยว / สอบ / รับคะแนนอย่างเดียว) =======================
+  views.gradeEntry = function (p) {
+    return api('grades.sheet', { offeringId: p.offeringId }).then(function (d) {
+      var a = d.assessments.filter(function (x) { return x.id === p.assessmentId; })[0];
+      if (!a) throw { message: 'ไม่พบรายการประเมิน' };
+      var perms = d.perms;
+      var rows = d.students.filter(function (s) { return s.enrollmentStatus === 'active' || s.cells[a.id].id; });
+      h(backBtn() + '<div class="breadcrumb">' + esc(d.offering.courseCode) + ' ' + esc(d.offering.courseName) + ' (' + esc(d.offering.section) + ') · ปี ' + esc(d.offering.yearBe) + ' ภาค ' + esc(d.offering.termNo) + '</div>' +
+        '<h1>ให้คะแนน: ' + esc(a.code) + ' ' + esc(a.title) + '</h1>' +
+        '<p><span class="chip info">' + esc(C.KIND[a.kind]) + '</span> คะแนนเต็ม <strong>' + esc(a.maxScore) + '</strong> · ' + (a.countsTowardGrade ? 'น้ำหนักในรายวิชา <strong>' + esc(a.weight) + '</strong>' : 'ไม่นับคะแนน') + '</p>' +
+        publishBar(a, a.stats.unpublished, perms) +
+        '<div class="notice info small">พิมพ์คะแนนแล้วกด Enter เพื่อไปคนถัดไป · ช่องว่างไม่ถือเป็นศูนย์ (ไม่บันทึก) · "ยกเว้น" ต้องระบุเหตุผล · ระบบบันทึกเฉพาะแถวที่เปลี่ยน</div>' +
+        '<div class="card table-scroll"><table class="grade-table"><thead><tr><th>ที่</th><th class="sticky">นักเรียน</th><th class="hide-sm">ห้อง</th><th>คะแนน (เต็ม ' + esc(a.maxScore) + ')</th><th>สถานะ</th><th>เหตุผล/หมายเหตุ</th><th class="hide-sm">ประกาศ</th></tr></thead><tbody>' +
+        rows.map(function (s, i) {
+          var c = s.cells[a.id];
+          var dis = s.enrollmentStatus !== 'active' && !c.id;
+          return '<tr data-row="' + s.studentId + '" data-ver="' + (c.version || 0) + '" data-st="' + c.status + '" data-sc="' + esc(c.score || '') + '" data-rs="' + esc(c.excuseReason || '') + '">' +
+            '<td>' + (i + 1) + '</td><td class="sticky">' + esc(s.code) + ' ' + esc(s.name) + (s.enrollmentStatus !== 'active' ? ' <span class="chip neutral">ถอน/ย้าย</span>' : '') + '</td><td class="hide-sm">' + esc(s.roomLabel) + '</td>' +
+            '<td><input class="score" type="text" inputmode="decimal" aria-label="คะแนนของ ' + esc(s.name) + '" value="' + esc(c.score || '') + '"' + (dis ? ' disabled' : '') + '></td>' +
+            '<td><select class="compact st" aria-label="สถานะของ ' + esc(s.name) + '"' + (dis ? ' disabled' : '') + '>' + statusOptions(c.status, true) + '</select></td>' +
+            '<td><input class="compact rs" type="text" maxlength="1000" aria-label="เหตุผลของ ' + esc(s.name) + '" value="' + esc(c.excuseReason || '') + '"' + (dis ? ' disabled' : '') + '></td>' +
+            '<td class="hide-sm small">' + (c.publishedAt ? (c.dirty ? '<span class="chip warn">มีการแก้</span>' : '<span class="chip ok">ประกาศแล้ว</span>') : (c.status !== 'not_assessed' ? '<span class="chip neutral">ยังไม่ประกาศ</span>' : '')) + '</td></tr>';
+        }).join('') + '</tbody></table></div><div id="ge-msg"></div>' +
+        '<p class="no-print" style="position:sticky;bottom:8px"><button class="btn" id="btn-save-scores"' + (perms.can_grade ? '' : ' disabled') + '>บันทึกคะแนน</button> <span class="small muted" id="ge-count"></span></p>');
+      bindBack(); bindPublish(a.id);
+      var inputs = qa('input.score');
+      function rowState(tr) {
+        var sc = q('input.score', tr).value.trim(), st = q('select.st', tr).value, rs = q('input.rs', tr).value.trim();
+        if (sc !== '' && st === 'not_assessed') st = 'scored';
+        return { score: sc, status: st, reason: rs };
+      }
+      function changed(tr) {
+        var s = rowState(tr);
+        if (s.status === 'scored' && s.score === '') return false;
+        return s.status !== tr.getAttribute('data-st') || (s.status === 'scored' && s.score !== tr.getAttribute('data-sc')) || (s.status === 'excused' && s.reason !== tr.getAttribute('data-rs'));
+      }
+      function mark() {
+        var n = 0;
+        qa('tr[data-row]').forEach(function (tr) { var c = changed(tr); tr.classList.toggle('changed', c); if (c) n++; });
+        q('#ge-count').textContent = n ? 'มีการเปลี่ยน ' + n + ' แถว (ยังไม่บันทึก)' : '';
+      }
+      inputs.forEach(function (inp, i) {
+        inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); if (inputs[i + 1]) { inputs[i + 1].focus(); inputs[i + 1].select(); } } });
+        inp.addEventListener('input', function () {
+          var sel = q('select.st', inp.closest('tr'));
+          if (inp.value.trim() !== '') sel.value = 'scored';
+          mark();
+        });
+      });
+      qa('select.st, input.rs').forEach(function (el) { el.addEventListener('change', mark); el.addEventListener('input', mark); });
+      on('#btn-save-scores', 'click', function () {
+        var entries = qa('tr[data-row]').filter(changed).map(function (tr) {
+          var s = rowState(tr);
+          return { studentId: tr.getAttribute('data-row'), status: s.status, score: s.status === 'scored' ? s.score : '', reason: s.reason, expectedVersion: Number(tr.getAttribute('data-ver')) };
+        });
+        if (!entries.length) { toast('ไม่มีคะแนนที่เปลี่ยน'); return; }
+        var btn = q('#btn-save-scores'); btn.disabled = true; btn.textContent = 'กำลังบันทึก…';
+        api('grades.save', { assessmentId: a.id, entries: entries }).then(function (r) {
+          toast('บันทึกแล้ว ' + r.saved + ' รายการ (ยังไม่ประกาศ)'); render();
+        }).catch(function (err) {
+          q('#ge-msg').innerHTML = errBox(err) + (err.code === 'CONFLICT' ? '<p><button class="btn ghost small" id="ge-reload">โหลดข้อมูลล่าสุด</button></p>' : '') +
+            '<p class="small muted">ยังไม่มีคะแนนใดถูกบันทึก (บันทึกทั้งชุดหรือไม่บันทึกเลย)</p>';
+          on('#ge-reload', 'click', render);
+          btn.disabled = false; btn.textContent = 'บันทึกคะแนน';
+        });
+      });
+    });
+  };
+
+  // ======================= ให้คะแนนกลุ่ม =======================
+  var MEMBER_STATE = {
+    synced: ['ok', 'ได้คะแนนกลุ่ม'], override: ['warn', 'ปรับรายคน'], pending: ['info', 'ยังไม่ได้รับคะแนนกลุ่มล่าสุด'],
+    none: ['neutral', 'ยังไม่ให้คะแนน'], not_enrolled: ['neutral', 'ไม่ได้ลงทะเบียนแล้ว']
+  };
+  views.groupGrading = function (p) {
+    return api('grades.groupSheet', { assessmentId: p.assessmentId }).then(function (d) {
+      var a = d.assessment, perms = d.perms;
+      var unpublished = 0;
+      d.groups.forEach(function (g) { g.members.forEach(function (m) { if (m.grade.dirty) unpublished++; }); });
+      d.ungrouped.forEach(function (u) { if (u.grade.dirty) unpublished++; });
+      h(backBtn() + '<div class="breadcrumb">' + esc(d.offering.courseCode) + ' ' + esc(d.offering.courseName) + ' (' + esc(d.offering.section) + ') · ปี ' + esc(d.offering.yearBe) + ' ภาค ' + esc(d.offering.termNo) + '</div>' +
+        '<h1>ให้คะแนนกลุ่ม: ' + esc(a.code) + ' ' + esc(a.title) + '</h1>' +
+        '<p>คะแนนเต็ม <strong>' + esc(a.maxScore) + '</strong> · น้ำหนักในรายวิชา <strong>' + esc(a.weight) + '</strong> · ' + (a.source === 'work_groups' ? 'ใช้กลุ่มประจำรายวิชา' : 'กลุ่มเฉพาะงานนี้') + '</p>' +
+        '<div class="notice info small">ให้คะแนนกลุ่มครั้งเดียว คะแนนกลุ่มเก็บที่กลุ่ม และระบบบันทึกเป็นคะแนนรายบุคคลของสมาชิกทุกคนที่ตรึงรายชื่อไว้โดยอัตโนมัติ (ไม่หารด้วยจำนวนสมาชิก) ' +
+        'การให้คะแนนจะตรึงรายชื่อกลุ่มของงานนี้ · สมาชิกที่ครูปรับรายคนจะคงคะแนนที่ปรับไว้ เว้นแต่เลือกยกเลิกการปรับ</div>' +
+        publishBar(a, unpublished, perms) +
+        (d.groups.length ? '' : '<div class="notice warn">ยังไม่มีกลุ่มในงานนี้</div>') +
+        d.groups.map(function (g) {
+          var gg = g.groupGrade || { status: 'scored', score: '', note: '', version: 0 };
+          return '<div class="card" data-group="' + g.id + '"><h2 style="margin-top:0">' + esc(g.name) + ' ' + (g.frozen ? '<span class="chip ok">ตรึงรายชื่อแล้ว</span>' : '<span class="chip neutral">ยังไม่ตรึง</span>') +
+            (g.submission ? ' <span class="chip info">ส่งแล้ว รุ่นที่ ' + g.submission.versionNo + '</span>' : ' <span class="chip neutral">ยังไม่ส่งงาน</span>') + '</h2>' +
+            '<div class="row"><div><label for="gs-' + g.id + '">คะแนนกลุ่ม (เต็ม ' + esc(a.maxScore) + ')</label><input class="score" id="gs-' + g.id + '" type="text" inputmode="decimal" value="' + esc(g.groupGrade ? gg.score : '') + '"></div>' +
+            '<div><label for="gst-' + g.id + '">สถานะ</label><select id="gst-' + g.id + '">' + statusOptions(g.groupGrade ? gg.status : 'scored', false) + '</select></div>' +
+            '<div style="flex:2 1 260px"><label for="gn-' + g.id + '">หมายเหตุ/ข้อเสนอแนะกลุ่ม</label><input id="gn-' + g.id + '" type="text" maxlength="2000" value="' + esc(gg.note || '') + '"></div></div>' +
+            '<p>' + (perms.can_grade ? '<button class="btn" data-save-group="' + g.id + '" data-ver="' + (g.groupGrade ? gg.version : 0) + '" data-name="' + esc(g.name) + '">บันทึกคะแนนกลุ่ม</button>' : '') +
+            (g.groupGrade ? ' <span class="small muted">คะแนนกลุ่มปัจจุบัน: ' + (gg.status === 'scored' ? esc(gg.score) : esc(STATUS[gg.status])) + '</span>' : '') + '</p>' +
+            '<div class="table-wrap"><table class="grade-table"><thead><tr><th>สมาชิก</th><th class="hide-sm">ห้อง</th><th class="num">คะแนนรายบุคคล</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
+            g.members.map(function (m) {
+              var stx = MEMBER_STATE[m.state] || MEMBER_STATE.none;
+              return '<tr><td>' + esc(m.studentCode) + ' ' + esc(m.name) + (m.isLeader ? ' ★' : '') + '</td><td class="hide-sm">' + esc(m.room) + '</td>' +
+                '<td class="num"><span class="cell' + (m.grade.isOverride ? ' override' : '') + (m.grade.dirty ? ' dirty' : '') + '"' + (m.grade.id ? ' data-hist="' + m.grade.id + '" data-title="' + esc(m.name + ' · ' + a.code) + '" tabindex="0" role="button"' : '') + '>' + cellText(m.grade) + '</span></td>' +
+                '<td><span class="chip ' + stx[0] + '">' + stx[1] + '</span>' + (m.grade.isOverride ? '<div class="small muted">' + esc(m.grade.overrideReason) + '</div>' : '') + '</td>' +
+                '<td>' + (perms.can_grade && m.enrollmentStatus ? '<button class="btn ghost small" data-ov="' + m.studentId + '" data-ver="' + (m.grade.version || 0) + '" data-name="' + esc(m.name) + '">ปรับรายคน</button>' +
+                  (m.grade.isOverride ? ' <button class="btn ghost small" data-clear="' + m.studentId + '" data-ver="' + m.grade.version + '" data-name="' + esc(m.name) + '">ใช้คะแนนกลุ่ม</button>' : '') : '') + '</td></tr>';
+            }).join('') + '</tbody></table></div></div>';
+        }).join('') +
+        (d.ungrouped.length ? '<div class="card"><h2 style="margin-top:0">นักเรียนที่ไม่มีกลุ่มในงานนี้</h2><p class="small muted">ให้คะแนนรายคนพร้อมเหตุผลได้ (บันทึกเป็นการปรับรายคน)</p><ul class="member-list">' +
+          d.ungrouped.map(function (u) {
+            return '<li><span>' + esc(u.studentCode) + ' ' + esc(u.name) + ' — ' + cellText(u.grade) + '</span>' + (perms.can_grade ? '<button class="btn ghost small" data-ov="' + u.studentId + '" data-ver="' + (u.grade.version || 0) + '" data-name="' + esc(u.name) + '">ให้คะแนนรายคน</button>' : '') + '</li>';
+          }).join('') + '</ul></div>' : ''));
+      bindBack(); bindPublish(a.id);
+      qa('[data-hist]').forEach(function (el) { el.addEventListener('click', function () { showHistory(el.getAttribute('data-hist'), el.getAttribute('data-title')); }); });
+
+      on('[data-save-group]', 'click', function (e) {
+        var b = e.currentTarget, gid = b.getAttribute('data-save-group');
+        var payload = { assessmentId: a.id, groupId: gid, status: q('#gst-' + gid).value, score: q('#gs-' + gid).value.trim(), note: q('#gn-' + gid).value, expectedVersion: Number(b.getAttribute('data-ver')) };
+        if (payload.status !== 'scored') payload.score = '';
+        api('grades.saveGroup', Object.assign({ preview: true }, payload)).then(function (pv) {
+          var commit = function (clear) {
+            return api('grades.saveGroup', Object.assign({ clearOverrides: clear }, payload)).then(function (r) {
+              document.getElementById('modal').close();
+              toast('บันทึกคะแนนกลุ่มแล้ว: ให้คะแนนสมาชิก ' + r.applied + ' คน' + (r.kept ? ' · คงคะแนนที่ปรับรายคน ' + r.kept + ' คน' : ''));
+              render();
+            });
+          };
+          var fmt = function (x) { return x.status === 'scored' ? esc(x.score) : esc(STATUS[x.status] || '–'); };
+          C.openModal('<h2 id="modal-title" style="margin-top:0">ตรวจก่อนบันทึก: ' + esc(pv.groupName) + '</h2>' +
+            '<p>คะแนนกลุ่ม: ' + (pv.before ? fmt({ status: pv.before.status, score: pv.before.score }) : '–') + ' → <strong>' + fmt(pv.after) + '</strong></p>' +
+            (pv.willFreeze ? '<div class="notice info small">การบันทึกจะตรึงรายชื่อกลุ่มของงานนี้ตามสมาชิกปัจจุบัน</div>' : '') +
+            '<div class="table-wrap"><table><thead><tr><th>สมาชิก</th><th>ก่อน</th><th>หลัง</th><th></th></tr></thead><tbody>' +
+            pv.members.map(function (m) {
+              return '<tr><td>' + esc(m.studentCode) + ' ' + esc(m.name) + '</td><td>' + fmt(m.before) + (m.before.isOverride ? ' <span class="chip warn">ปรับรายคน</span>' : '') + '</td>' +
+                '<td>' + (m.action === 'skip_not_enrolled' ? 'ข้าม (ไม่ได้ลงทะเบียน)' : m.action === 'keep_override' ? '<span class="pv-after" data-sid="' + m.studentId + '">' + fmt(m.before) + ' (คงไว้)</span>' : fmt(m.after)) + '</td>' +
+                '<td>' + (m.action === 'keep_override' ? '<label class="check" style="margin:0"><input type="checkbox" name="pv-clear" value="' + m.studentId + '"> ยกเลิกการปรับ ใช้คะแนนกลุ่ม</label>' : '') + '</td></tr>';
+            }).join('') + '</tbody></table></div><div id="pv-msg"></div>' +
+            '<p><button class="btn" id="pv-ok">ยืนยันบันทึก</button> <button class="btn ghost" data-close>ยกเลิก</button></p>');
+          on('#pv-ok', 'click', function () {
+            commit(C.picked('pv-clear', q('#modal'))).catch(function (err) { q('#pv-msg').innerHTML = errBox(err); });
+          });
+        }).catch(function (err) { toast(err.message); });
+      });
+
+      on('[data-ov]', 'click', function (e) {
+        var b = e.currentTarget;
+        C.openModal('<h2 id="modal-title" style="margin-top:0">ปรับคะแนนรายคน: ' + esc(b.getAttribute('data-name')) + '</h2>' +
+          '<p class="small muted">คะแนนที่ปรับจะไม่ถูกเขียนทับเมื่อแก้คะแนนกลุ่มครั้งถัดไป นักเรียนคนอื่นไม่เห็นคะแนนที่ปรับของเพื่อน</p>' +
+          '<form id="ovf"><div class="row"><div><label for="ov-sc">คะแนน (เต็ม ' + esc(a.maxScore) + ')</label><input id="ov-sc" class="score" type="text" inputmode="decimal"></div>' +
+          '<div><label for="ov-st">สถานะ</label><select id="ov-st">' + statusOptions('scored', false) + '</select></div></div>' +
+          '<label for="ov-rs">เหตุผลหรือหลักฐานการมีส่วนร่วม (จำเป็น)</label><textarea id="ov-rs" maxlength="1000"></textarea>' +
+          '<div id="ov-msg"></div><p><button class="btn" type="submit">บันทึก</button> <button class="btn ghost" type="button" data-close>ยกเลิก</button></p></form>');
+        q('#ovf').addEventListener('submit', function (ev) {
+          ev.preventDefault();
+          api('grades.override', { assessmentId: a.id, studentId: b.getAttribute('data-ov'), status: q('#ov-st').value, score: q('#ov-sc').value.trim(), reason: q('#ov-rs').value, expectedVersion: Number(b.getAttribute('data-ver')) })
+            .then(function () { document.getElementById('modal').close(); toast('บันทึกแล้ว'); render(); }).catch(function (err) { q('#ov-msg').innerHTML = errBox(err); });
+        });
+      });
+      on('[data-clear]', 'click', function (e) {
+        var b = e.currentTarget;
+        var reason = prompt('เหตุผลที่ยกเลิกการปรับรายคนของ ' + b.getAttribute('data-name') + ' (กลับไปใช้คะแนนกลุ่ม)');
+        if (!reason) return;
+        api('grades.override', { assessmentId: a.id, studentId: b.getAttribute('data-clear'), clear: true, reason: reason, expectedVersion: Number(b.getAttribute('data-ver')) })
+          .then(function () { toast('ใช้คะแนนกลุ่มแล้ว'); render(); }).catch(function (err) { toast(err.message); });
+      });
+    });
+  };
+
+  // ======================= คะแนนของฉัน (นักเรียน) =======================
+  views.studentGrades = function (p) {
+    return api('student.grades', { offeringId: p.offeringId }).then(function (d) {
+      var t = d.total;
+      var big = t.status === 'complete' ? esc(t.final) : t.status === 'incomplete' ? esc(t.provisional) : '–';
+      h(backBtn() + '<h1>' + esc(p.title || 'รายวิชา') + '</h1>' + C.studentTabs(p, 'studentGrades') +
+        '<div class="card"><div class="small muted">คะแนนรวม (เต็ม 100)</div><div class="big-code" style="letter-spacing:0">' + big + '</div>' +
+        '<p>' + (t.status === 'complete' ? '<span class="chip ok">ครบทุกรายการ</span>' + (t.grade ? ' เกรด <strong>' + esc(t.grade.label) + '</strong>' : '') :
+          t.status === 'incomplete' ? '<span class="chip warn">ยังไม่ครบ</span> ประเมินแล้ว ' + esc(t.assessedWeightPct) + '% ของน้ำหนัก' : '<span class="chip neutral">' + esc(t.label) + '</span>') + '</p>' +
+        (d.note ? '<p class="small muted">' + esc(d.note) + '</p>' : '') + '</div>' +
+        '<div class="card table-wrap"><table><thead><tr><th>งาน</th><th class="hide-sm">ประเภท</th><th class="num">คะแนนเต็ม</th><th class="num hide-sm">น้ำหนัก</th><th>คะแนนของฉัน</th><th class="num hide-sm">คิดน้ำหนัก</th></tr></thead><tbody>' +
+        (d.items.length ? d.items.map(function (i) {
+          return '<tr><td>' + esc(i.code) + ' ' + esc(i.title) + '</td><td class="hide-sm">' + esc(C.KIND[i.kind]) + '</td><td class="num">' + esc(i.maxScore) + '</td><td class="num hide-sm">' + (i.countsTowardGrade ? esc(i.weight) : 'ไม่นับ') + '</td>' +
+            '<td>' + (i.score !== null ? '<strong>' + esc(i.score) + '</strong>' : '<span class="chip ' + (i.status === 'not_published' ? 'neutral' : 'warn') + '">' + esc(i.statusLabel) + '</span>') + '</td>' +
+            '<td class="num hide-sm">' + esc(i.weighted || '') + '</td></tr>';
+        }).join('') : '<tr><td colspan="6" class="empty">ยังไม่มีงาน</td></tr>') + '</tbody></table></div>');
+      bindBack(); C.bindTabs(p);
+    });
+  };
+
+  // ======================= รายงาน =======================
+  function downloadXlsx(req, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'กำลังสร้างไฟล์…'; }
+    return api('report.xlsx', req).then(function (x) {
+      var bin = atob(x.base64), arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      C.download(x.fileName, x.mime, new Blob([arr], { type: x.mime }));
+      toast('ดาวน์โหลด ' + x.fileName);
+    }).catch(function (err) { toast(err.message); }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = 'Excel (.xlsx)'; }
+    });
+  }
+  function reportButtons(key) {
+    return '<button class="btn small" data-rv="' + key + '">ดูรายงาน / PDF</button> <button class="btn ghost small" data-rx="' + key + '">Excel (.xlsx)</button>';
+  }
+  function bindReportButtons(reqs) {
+    on('[data-rv]', 'click', function (e) { var r = reqs[e.currentTarget.getAttribute('data-rv')](); if (r) go('reportView', { req: r }); });
+    on('[data-rx]', 'click', function (e) { var r = reqs[e.currentTarget.getAttribute('data-rx')](); if (r) downloadXlsx(r, e.currentTarget); });
+  }
+
+  views.offeringReports = function (p) {
+    return api('offering.roster', { offeringId: p.offeringId }).then(function (d) {
+      var o = d.offering;
+      h(backBtn() + C.offeringHeader(o) + C.offeringTabs(p, 'offeringReports', o.perms) +
+        '<div class="grid">' +
+        '<div class="card"><h3 style="margin-top:0">สมุดคะแนนรายวิชา แยกตามห้อง</h3><p class="small muted">คะแนนทุกรายการ คะแนนรวม สถานะ และเกรด แยกเป็นห้องละตาราง (Excel แยกห้องละชีต)</p>' + reportButtons('room') + '</div>' +
+        '<div class="card"><h3 style="margin-top:0">สมุดคะแนนรายวิชา รวมทุกห้อง</h3><p class="small muted">นักเรียนทั้งหมดในตารางเดียว</p>' + reportButtons('all') + '</div>' +
+        '<div class="card"><h3 style="margin-top:0">ผลประเมินงานกลุ่ม แยกตามกลุ่ม</h3><p class="small muted">คะแนนกลุ่มของแต่ละงาน และคะแนนรายบุคคลของสมาชิก (รวมการปรับรายคน)</p>' + reportButtons('groups') + '</div>' +
+        '</div><p class="small muted">PDF: เปิด "ดูรายงาน / PDF" แล้วกดพิมพ์และเลือก "บันทึกเป็น PDF" (รองรับภาษาไทยด้วยฟอนต์ของเบราว์เซอร์) · ค่าคะแนนในหน้าจอ PDF และ Excel มาจากการคำนวณชุดเดียวกัน</p>');
+      bindBack(); C.bindOfferingTabs(p);
+      bindReportButtons({
+        room: function () { return { kind: 'offering', offeringId: p.offeringId, groupBy: 'room' }; },
+        all: function () { return { kind: 'offering', offeringId: p.offeringId, groupBy: 'all' }; },
+        groups: function () { return { kind: 'groups', offeringId: p.offeringId }; }
+      });
+    });
+  };
+
+  views.adminReports = function () {
+    return Promise.all([api('registry.students', { status: 'active' }), api('course.terms'), api('offering.list', {})]).then(function (r) {
+      var rooms = r[0].rooms, years = r[1], offerings = r[2];
+      var termOpts = '<option value="">ทุกภาคเรียน (ยังไม่เก็บถาวร)</option>' + years.map(function (y) { return y.terms.map(function (t) { return '<option value="' + t.id + '">' + esc(t.label) + '</option>'; }).join(''); }).join('');
+      var offOpts = offerings.map(function (o) { return '<option value="' + o.offeringId + '">' + esc(o.courseCode) + ' ' + esc(o.courseName) + ' (' + esc(o.section) + ') ' + esc(o.yearBe) + '/' + esc(o.termNo) + '</option>'; }).join('');
+      h(backBtn() + '<h1>รายงาน PDF / Excel</h1><div class="grid">' +
+        '<div class="card"><h3 style="margin-top:0">สรุปคะแนนรายห้อง (ทุกรายวิชา)</h3><label for="rp-room">ห้องเรียน</label><select id="rp-room">' +
+        rooms.map(function (x) { return '<option value="' + esc(x.classLevel + '|' + x.room) + '">' + esc(x.label) + ' (' + x.count + ' คน)</option>'; }).join('') + '</select>' +
+        '<label for="rp-term">ภาคเรียน</label><select id="rp-term">' + termOpts + '</select><p>' + reportButtons('room') + '</p></div>' +
+        '<div class="card"><h3 style="margin-top:0">สมุดคะแนนรายวิชา</h3><label for="rp-off">รายวิชา</label><select id="rp-off">' + offOpts + '</select>' +
+        '<label for="rp-by">จัดกลุ่มรายงาน</label><select id="rp-by"><option value="room">แยกตามห้อง</option><option value="all">รวมทุกห้อง</option></select><p>' + reportButtons('offering') + '</p></div>' +
+        '<div class="card"><h3 style="margin-top:0">ผลประเมินงานกลุ่ม แยกตามกลุ่ม</h3><label for="rp-off2">รายวิชา</label><select id="rp-off2">' + offOpts + '</select><p>' + reportButtons('groups') + '</p></div>' +
+        '</div>');
+      bindBack();
+      bindReportButtons({
+        room: function () {
+          if (!q('#rp-room').value) { toast('ยังไม่มีห้องเรียนในทะเบียน'); return null; }
+          var x = q('#rp-room').value.split('|');
+          return { kind: 'room', classLevel: x[0], room: x[1], termId: q('#rp-term').value };
+        },
+        offering: function () { return q('#rp-off').value ? { kind: 'offering', offeringId: q('#rp-off').value, groupBy: q('#rp-by').value } : (toast('ยังไม่มีรายวิชา'), null); },
+        groups: function () { return q('#rp-off2').value ? { kind: 'groups', offeringId: q('#rp-off2').value } : (toast('ยังไม่มีรายวิชา'), null); }
+      });
+    });
+  };
+
+  /** หน้ารายงานสำหรับพิมพ์/บันทึกเป็น PDF (A4 หัวตารางซ้ำทุกหน้า มีเลขหน้า) */
+  views.reportView = function (p) {
+    return api('report.data', p.req).then(function (doc) {
+      var cell = function (v) {
+        if (v && typeof v === 'object') return '<td class="num">' + esc(v.v) + '</td>';
+        return '<td>' + esc(v === null || v === undefined ? '' : v) + '</td>';
+      };
+      var style = document.getElementById('print-page') || document.head.appendChild(Object.assign(document.createElement('style'), { id: 'print-page' }));
+      style.textContent = '@page { size: A4 ' + (doc.orientation === 'landscape' ? 'landscape' : 'portrait') + '; margin: 12mm 10mm 14mm; ' +
+        '@bottom-right { content: "หน้า " counter(page) " / " counter(pages); font: 9pt Sarabun, sans-serif; } ' +
+        '@bottom-left { content: "' + String(doc.school + ' · ' + doc.title + ' · ออกเมื่อ ' + doc.issuedAtText).replace(/["\\]/g, '') + '"; font: 8pt Sarabun, sans-serif; } }';
+      h('<div class="no-print">' + backBtn() + '<div class="card"><button class="btn" id="rv-print">🖨 พิมพ์ / บันทึกเป็น PDF</button> <button class="btn ghost" id="rv-xlsx">Excel (.xlsx)</button> ' +
+        '<label class="check" style="display:inline-flex;margin-left:8px"><input id="rv-sign" type="checkbox"> แสดงช่องลงชื่อ</label>' +
+        '<p class="small muted">ในหน้าต่างพิมพ์ เลือกปลายทาง "บันทึกเป็น PDF" · ขนาดกระดาษ A4 ' + (doc.orientation === 'landscape' ? 'แนวนอน' : 'แนวตั้ง') + ' · หัวตารางพิมพ์ซ้ำทุกหน้า</p></div></div>' +
+        '<article class="report-page" id="report">' +
+        '<div class="r-school">' + esc(doc.school) + '</div><h1>' + esc(doc.title) + '</h1>' + (doc.courseLine ? '<div class="r-course">' + esc(doc.courseLine) + '</div>' : '') +
+        (doc.provisional ? '<div class="r-provisional">รายงานชั่วคราว — ยังไม่ใช่ผลปิดรายวิชา</div>' : '') +
+        '<div class="r-meta">' + doc.meta.map(function (m) { return '<div><b>' + esc(m[0]) + ':</b> ' + esc(m[1]) + '</div>'; }).join('') + '</div>' +
+        doc.sections.map(function (sec) {
+          return '<section><h2>' + esc(sec.title) + '</h2><table><thead><tr>' + sec.columns.map(function (c) { return '<th>' + esc(c.label) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+            (sec.rows.length ? sec.rows.map(function (r) { return '<tr>' + r.map(cell).join('') + '</tr>'; }).join('') : '<tr><td colspan="' + sec.columns.length + '">ไม่มีข้อมูล</td></tr>') + '</tbody></table></section>';
+        }).join('') +
+        '<div class="r-notes">' + (doc.legend && doc.legend.length ? '<p><b>ความหมายสัญลักษณ์:</b> ' + doc.legend.map(esc).join(' · ') + '</p>' : '') +
+        (doc.notes && doc.notes.length ? '<p><b>คำอธิบายเกณฑ์:</b></p><ul>' + doc.notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>' : '') +
+        '<p>ออกรายงานโดย ' + esc(doc.issuedBy) + ' เมื่อ ' + esc(doc.issuedAtText) + ' (' + esc(doc.appName) + ')</p></div>' +
+        '<div class="r-sign" id="r-sign" hidden><div>ลงชื่อ ........................................<br>ครูผู้สอน</div><div>ลงชื่อ ........................................<br>หัวหน้ากลุ่มสาระ</div><div>ลงชื่อ ........................................<br>ผู้บริหาร / ผู้ตรวจสอบ</div></div>' +
+        '</article>');
+      bindBack();
+      on('#rv-print', 'click', function () { window.print(); });
+      on('#rv-xlsx', 'click', function (e) { downloadXlsx(p.req, e.currentTarget); });
+      on('#rv-sign', 'change', function () { q('#r-sign').hidden = !q('#rv-sign').checked; });
+    });
+  };
+})(window.CWK);
+</script>

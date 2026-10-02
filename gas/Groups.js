@@ -135,6 +135,7 @@ var Groups = {
   _studentRc: function (tx, ctx, assessmentId) {
     var rc = Submission.resolve(ctx, assessmentId, true);
     if (rc.assessment.kind !== 'group' || !rc.groupSet) Errors.raise('VALIDATION', 'งานนี้ไม่ใช่งานกลุ่ม');
+    if (rc.groupSet.source === 'work_groups') Errors.raise('VALIDATION', 'งานนี้ใช้กลุ่มประจำรายวิชา จัดการกลุ่มได้ที่หน้า "กลุ่มของฉัน" ของรายวิชา');
     Groups.freezeSetIfClosed(tx, rc.groupSet);
     var gs = tx.get('assignment_group_sets', rc.groupSet.id);
     if (gs.formation_close_at && tx.now > gs.formation_close_at) Errors.raise('GROUP_FORMATION_CLOSED');
@@ -296,7 +297,7 @@ var Groups = {
     });
     var closed = !!(gs.formation_close_at && Util.nowIso() > gs.formation_close_at);
     return {
-      settings: { minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval, closed: closed },
+      settings: { minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval, closed: closed, source: gs.source || 'self' },
       myGroup: rc.group ? Groups.groupDtoForStudent(rc.group) : null,
       invitations: invites,
       openGroups: rc.group ? [] : groups.filter(function (g) { return !g.frozen_at && g.active_count < gs.max_size; })
@@ -332,7 +333,7 @@ var Groups = {
       return e.status === 'active' && !grouped[e.student_id];
     }).map(function (e) { var s = Db.get('students', e.student_id); return { studentId: s.id, studentCode: s.student_code, name: Groups.studentName(s), room: s.room }; });
     return {
-      settings: { id: gs.id, minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval },
+      settings: { id: gs.id, minSize: gs.min_size, maxSize: gs.max_size, formationCloseAt: gs.formation_close_at, requireApproval: gs.require_approval, source: gs.source || 'self' },
       groups: rows,
       incomplete: rows.filter(function (r) { return !r.sizeOk; }).map(function (r) { return { id: r.id, name: r.name, count: r.count }; }),
       ungrouped: ungrouped,
@@ -377,6 +378,9 @@ var Groups = {
       var to = req.groupId ? tx.get('groups', req.groupId) : null;
       if (req.groupId && (!to || to.group_set_id !== gs.id || to.status === 'disbanded')) Errors.raise('NOT_FOUND');
       if (from && to && from.id === to.id) return { ok: true, unchanged: true };
+      if (gs.source === 'work_groups' && ((from && !from.frozen_at) || !to || !to.frozen_at)) {
+        Errors.raise('VALIDATION', 'งานนี้ใช้กลุ่มประจำรายวิชา ให้ย้ายสมาชิกที่หน้า "กลุ่มประจำรายวิชา" (หน้านี้ใช้ปรับเฉพาะกลุ่มที่ตรึงรายชื่อแล้ว)');
+      }
       var reason = Util.str(req.reason, 500);
       var affected = [from, to].filter(function (g) { return g && g.frozen_at; });
       var toCount = to ? tx.find('group_memberships', { group_id: to.id, status: 'active' }).length : 0;
@@ -436,6 +440,7 @@ var Groups = {
       Authz.requireOffering(ctx, dst.offering_id, 'can_manage');
       var sgs = tx.one('assignment_group_sets', { assessment_id: src.id });
       var dgs = tx.one('assignment_group_sets', { assessment_id: dst.id });
+      if (dgs.source === 'work_groups') Errors.raise('VALIDATION', 'งานปลายทางใช้กลุ่มประจำรายวิชาอยู่แล้ว');
       var taken = {};
       tx.find('group_memberships', { group_set_id: dgs.id, status: 'active' }).forEach(function (m) { taken[m.student_id] = true; });
       var created = 0, skipped = [];

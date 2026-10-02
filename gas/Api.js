@@ -12,6 +12,8 @@ var Api = {
     'auth.logout': { public: true, fn: function (p, ctx, req) { return Auth.logout(req.token); } },
     'auth.me': { allowMustChange: true, fn: function (p, ctx) { return Auth.profile(ctx); } },
     'auth.changePassword': { allowMustChange: true, fn: function (p, ctx) { return Auth.changePassword(ctx, p.oldPassword, p.newPassword); } },
+    'auth.registrationInfo': { public: true, fn: function (p) { return Registry.registrationInfo(p); } },
+    'auth.register': { public: true, fn: function (p) { return Registry.register(p); } },
     'notify.list': { fn: function (p, ctx) { return Notify.listMine(ctx); } },
     'notify.markRead': { fn: function (p, ctx) { return Notify.markRead(ctx, p.ids); } },
 
@@ -34,6 +36,14 @@ var Api = {
     'group.requestJoin': { fn: function (p, ctx) { return Groups.requestJoin(ctx, p); } },
     'group.decideRequest': { fn: function (p, ctx) { return Groups.decideRequest(ctx, p); } },
     'group.leave': { fn: function (p, ctx) { return Groups.leave(ctx, p); } },
+    'student.join': { fn: function (p, ctx) { return Courses.joinByCode(ctx, p); } },
+    'student.grades': { fn: function (p, ctx) { return Gradebook.mine(ctx, p.offeringId); } },
+    'wg.mine': { fn: function (p, ctx) { return WorkGroups.mine(ctx, p.offeringId); } },
+    'wg.create': { fn: function (p, ctx) { return WorkGroups.create(ctx, p); } },
+    'wg.invite': { fn: function (p, ctx) { return WorkGroups.invite(ctx, p); } },
+    'wg.respond': { fn: function (p, ctx) { return WorkGroups.respond(ctx, p); } },
+    'wg.leave': { fn: function (p, ctx) { return WorkGroups.leave(ctx, p); } },
+    'wg.leaderRemove': { fn: function (p, ctx) { return WorkGroups.leaderRemove(ctx, p); } },
 
     // ครู
     'teacher.offerings': { fn: function (p, ctx) { return Teaching.myOfferings(ctx); } },
@@ -47,6 +57,44 @@ var Api = {
     'teacher.groupAssign': { fn: function (p, ctx) { return Groups.teacherAssign(ctx, p); } },
     'teacher.groupCopy': { fn: function (p, ctx) { return Groups.teacherCopyFrom(ctx, p); } },
 
+    // รายวิชาและทะเบียนผู้เรียน (ครูและผู้ดูแล)
+    'course.terms': { fn: function (p, ctx) { return Courses.terms(ctx); } },
+    'course.catalog': { fn: function (p, ctx) { return Courses.catalog(ctx); } },
+    'course.save': { fn: function (p, ctx) { return Courses.saveCourse(ctx, p); } },
+    'offering.list': { fn: function (p, ctx) { return Courses.offerings(ctx, p); } },
+    'offering.save': { fn: function (p, ctx) { return Courses.saveOffering(ctx, p); } },
+    'offering.coTeachers': { fn: function (p, ctx) { return Courses.coTeachers(ctx, p.offeringId); } },
+    'offering.setCoTeacher': { fn: function (p, ctx) { return Courses.setCoTeacher(ctx, p); } },
+    'offering.roster': { fn: function (p, ctx) { return Courses.roster(ctx, p); } },
+    'offering.candidates': { fn: function (p, ctx) { return Courses.candidates(ctx, p); } },
+    'offering.enroll': { fn: function (p, ctx) { return Courses.enroll(ctx, p); } },
+    'offering.withdraw': { fn: function (p, ctx) { return Courses.withdraw(ctx, p); } },
+    'offering.setJoin': { fn: function (p, ctx) { return Courses.setJoin(ctx, p); } },
+    'registry.students': { fn: function (p, ctx) { return Registry.listStudents(ctx, p); } },
+    'registry.teachers': { fn: function (p, ctx) { return Registry.listTeachers(ctx); } },
+
+    // กลุ่มประจำรายวิชา (ครูและผู้ดูแล)
+    'wg.overview': { fn: function (p, ctx) { return WorkGroups.overview(ctx, p.offeringId); } },
+    'wg.save': { fn: function (p, ctx) { return WorkGroups.save(ctx, p); } },
+    'wg.addMembers': { fn: function (p, ctx) { return WorkGroups.addMembers(ctx, p); } },
+    'wg.removeMember': { fn: function (p, ctx) { return WorkGroups.removeMember(ctx, p); } },
+    'wg.disband': { fn: function (p, ctx) { return WorkGroups.disband(ctx, p); } },
+    'wg.auto': { fn: function (p, ctx) { return WorkGroups.autoGroup(ctx, p); } },
+    'wg.settings': { fn: function (p, ctx) { return WorkGroups.saveSettings(ctx, p); } },
+
+    // สมุดคะแนน
+    'grades.sheet': { fn: function (p, ctx) { return Gradebook.sheet(ctx, p.offeringId); } },
+    'grades.save': { fn: function (p, ctx) { return Gradebook.saveScores(ctx, p); } },
+    'grades.groupSheet': { fn: function (p, ctx) { return Gradebook.groupSheet(ctx, p.assessmentId); } },
+    'grades.saveGroup': { fn: function (p, ctx) { return Gradebook.saveGroup(ctx, p); } },
+    'grades.override': { fn: function (p, ctx) { return Gradebook.override(ctx, p); } },
+    'grades.publish': { fn: function (p, ctx) { return Gradebook.publish(ctx, p); } },
+    'grades.history': { fn: function (p, ctx) { return Gradebook.history(ctx, p); } },
+
+    // รายงาน
+    'report.data': { fn: function (p, ctx) { return Reports.data(ctx, p); } },
+    'report.xlsx': { fn: function (p, ctx) { return Reports.xlsx(ctx, p); } },
+
     // ไฟล์และแฟ้มเสมือน
     'files.open': { fn: function (p, ctx) { return Files.open(ctx, p); } },
     'files.chunk': { fn: function (p, ctx) { return Files.chunk(ctx, p); } },
@@ -57,7 +105,17 @@ var Api = {
     'admin.status': { fn: function (p, ctx) { return Maintenance.status(ctx); } },
     'admin.updateSettings': { fn: function (p, ctx) { return Settings.update(ctx, p.changes); } },
     'admin.resetPassword': { fn: function (p, ctx) { return Auth.adminResetPassword(ctx, p.userId); } },
-    'admin.setUserStatus': { fn: function (p, ctx) { return Auth.adminSetStatus(ctx, p.userId, p.status, p.reason); } }
+    'admin.setUserStatus': { fn: function (p, ctx) { return Auth.adminSetStatus(ctx, p.userId, p.status, p.reason); } },
+    'admin.saveStudent': { fn: function (p, ctx) { return Registry.saveStudent(ctx, p); } },
+    'admin.createStudentAccount': { fn: function (p, ctx) { return Registry.createStudentAccount(ctx, p); } },
+    'admin.importStudents': { fn: function (p, ctx) { return Registry.importStudents(ctx, p); } },
+    'admin.saveTeacher': { fn: function (p, ctx) { return Registry.saveTeacher(ctx, p); } },
+    'admin.setRole': { fn: function (p, ctx) { return Registry.setRole(ctx, p); } },
+    'admin.staffUsers': { fn: function (p, ctx) { return Registry.listStaffUsers(ctx); } },
+    'admin.registrations': { fn: function (p, ctx) { return Registry.listRegistrations(ctx, p); } },
+    'admin.decideRegistration': { fn: function (p, ctx) { return Registry.decideRegistration(ctx, p); } },
+    'admin.saveYear': { fn: function (p, ctx) { return Courses.saveYear(ctx, p); } },
+    'admin.saveTerm': { fn: function (p, ctx) { return Courses.saveTerm(ctx, p); } }
   },
 
   handle: function (request) {

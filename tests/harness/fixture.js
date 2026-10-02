@@ -20,7 +20,16 @@ function fixture(opts) {
   /** แก้ข้อมูลภาระงานโดยตรง (ใช้จำลองเวลา) */
   const patchAssessment = (code, patch) => g.Db.tx('fixture', (tx) => tx.update('assessments', id(code), patch));
   const iso = (days) => new Date(Date.now() + days * 86400000).toISOString();
-  return Object.assign(env, { t, offA, W1: id('W1'), G1: id('G1'), EX1: id('EX1'), studentId, patchAssessment, iso });
+  let adminTok = null;
+  /** โทเคนผู้ดูแล (เปลี่ยนรหัสผ่านชั่วคราวให้แล้ว) */
+  const admin = () => {
+    if (!adminTok) {
+      const t0 = ok(g, 'auth.login', { username: 'demo_admin', password: accounts.demo_admin }).token;
+      adminTok = ok(g, 'auth.changePassword', { oldPassword: accounts.demo_admin, newPassword: 'Admin#Strong2026' }, t0).token;
+    }
+    return adminTok;
+  };
+  return Object.assign(env, { t, admin, offA, W1: id('W1'), G1: id('G1'), EX1: id('EX1'), GP1: id('GP1'), studentId, patchAssessment, iso });
 }
 
 let keySeq = 0;

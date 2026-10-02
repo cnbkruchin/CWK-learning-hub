@@ -118,6 +118,8 @@ var Setup = {
         session_epoch: 0
       });
       tx.insert('role_assignments', { school_id: school.id, user_id: user.id, role: 'admin' });
+      // ผู้ดูแลคนแรกได้สิทธิ์ให้/แก้คะแนน (grade_admin) ด้วย เพื่อให้ผู้ดูแลให้คะแนนแทนครูได้ — เพิกถอนได้ที่หน้าจัดการบัญชี และทุกการแก้มีบันทึก
+      tx.insert('role_assignments', { school_id: school.id, user_id: user.id, role: 'grade_admin', reason: 'ผู้ดูแลคนแรก' });
     });
     return { username: username, tempPassword: tempPassword };
   },

@@ -25,7 +25,7 @@ function apiCall(request) {
 }
 
 function include(name) {
-  var allowed = ['ui/Styles', 'ui/App'];
+  var allowed = ['ui/Styles', 'ui/App', 'ui/Manage', 'ui/Grades'];
   if (allowed.indexOf(name) < 0) throw new Error('not allowed');
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }

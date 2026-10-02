@@ -110,6 +110,22 @@ var Seed = {
         offering_id: off.id, code: 'EX1', title: 'สอบกลางภาค', kind: 'exam', submission_mode: 'none', max_score: '50', weight: '50',
         counts_toward_grade: true, due_at: iso(20), status: 'published', sort: 3
       });
+
+      // กลุ่มประจำรายวิชา (กลุ่มเดิมทำงานกลุ่มได้หลายงาน) และงานกลุ่มที่ใช้กลุ่มประจำรายวิชา (ไม่นับคะแนน เป็นตัวอย่าง)
+      [['ทีมอัลฟา', students.slice(0, 3)], ['ทีมเบต้า', students.slice(3, 6)]].forEach(function (w) {
+        var wg = tx.insert('work_groups', { offering_id: off.id, name: w[0], leader_student_id: w[1][0].id, status: 'active', active_count: w[1].length });
+        w[1].forEach(function (st) {
+          tx.insert('work_group_members', { work_group_id: wg.id, offering_id: off.id, student_id: st.id, status: 'active', responded_at: tx.now });
+        });
+      });
+      var gp = tx.insert('assessments', {
+        offering_id: off.id, code: 'GP1', title: 'รายงานกลุ่ม: สำรวจการใช้เทคโนโลยีในชุมชน', description: 'ใช้กลุ่มประจำรายวิชา ส่งรายงานกลุ่มละ 1 ฉบับ',
+        kind: 'group', submission_mode: 'file', max_score: '10', weight: '0', counts_toward_grade: false,
+        open_at: iso(-1), due_at: iso(21), close_at: iso(21), allow_late: false, allowed_types: 'pdf,docx',
+        max_files: 5, max_file_mb: 25, max_attempts: 0, group_submit_policy: 'any_member', status: 'published', sort: 4
+      });
+      tx.insert('assignment_group_sets', { offering_id: off.id, assessment_id: gp.id, min_size: 1, max_size: 5, require_approval: false, section_restricted: true, source: 'work_groups' });
+      WorkGroups.syncOffering(tx, off.id, null, null);
     });
     return { accounts: accounts };
   }
