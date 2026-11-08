@@ -1,0 +1,18 @@
+rules_version = '2';
+/**
+ * CWK Learning Hub — Cloud Storage Security Rules
+ * - uploads/{uid}/...  ผู้ใช้อัปโหลดไฟล์ของตนเท่านั้น จากนั้น Cloud Functions ตรวจชนิด/ขนาดจริงแล้วย้ายไป files/
+ * - files/...          ไม่เปิดให้แอปอ่านตรง: ดาวน์โหลดผ่าน Cloud Function (files.open / files.chunk) ซึ่งตรวจสิทธิ์ทุกครั้ง
+ *                       (ครูของรายวิชา ผู้ดูแล ผู้อัปโหลด หรือสมาชิกที่ได้รับสิทธิ์) ไม่มีลิงก์สาธารณะ
+ *                       และไม่ต้องตั้งค่า CORS/สิทธิ์ข้ามบริการเพิ่ม
+ */
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /uploads/{uid}/{name} {
+      allow create: if request.auth != null && request.auth.uid == uid &&
+        request.resource.size > 0 && request.resource.size < 100 * 1024 * 1024;
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    match /{all=**} { allow read, write: if false; }
+  }
+}

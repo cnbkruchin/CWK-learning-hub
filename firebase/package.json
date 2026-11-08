@@ -1,0 +1,31 @@
+{
+  "name": "cwk-learning-hub-firebase",
+  "private": true,
+  "type": "module",
+  "description": "CWK Learning Hub — Firebase edition: realtime mobile app (PWA + Capacitor iOS/Android) on Firestore, Auth, Storage and Cloud Functions",
+  "scripts": {
+    "shared": "node tools/sync-shared.mjs",
+    "dev": "vite --config app/vite.config.js",
+    "build": "vite build --config app/vite.config.js",
+    "emulators": "firebase emulators:start --project demo-cwk",
+    "seed": "node scripts/seed.mjs",
+    "dev:demo": "node scripts/dev-demo.mjs",
+    "test": "firebase emulators:exec --project demo-cwk --only auth,firestore,functions,storage \"node --test --test-concurrency=1 tests/*.test.mjs\"",
+    "test:e2e": "firebase emulators:exec --project demo-cwk --only auth,firestore,functions,storage \"node tests-e2e/app.e2e.mjs\"",
+    "cap:sync": "npm run build && cap sync",
+    "cap:android": "npm run build && cap sync android && cap open android",
+    "cap:ios": "npm run build && cap sync ios && cap open ios"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/ios": "^8.6.0",
+    "firebase": "^13.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.0",
+    "firebase-tools": "^15.35.0",
+    "vite": "^8.3.6"
+  }
+}

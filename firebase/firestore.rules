@@ -1,0 +1,113 @@
+rules_version = '2';
+/**
+ * CWK Learning Hub — Firestore Security Rules
+ *
+ * - การเขียนทั้งหมดผ่าน Cloud Functions (Admin SDK ข้ามกฎนี้) แอปเขียนตรงได้เพียงสถานะ "อ่านแล้ว" ของแจ้งเตือนตนเอง
+ * - กฎนี้คุมการอ่านแบบเรียลไทม์: บทบาทจาก custom claims { sid, roles, tid, stid } + ความสัมพันธ์กับรายวิชา
+ * - นักเรียนไม่เห็นคะแนนร่าง/คะแนนของเพื่อน (grades อ่านได้เฉพาะครู นักเรียนอ่าน published/{ตนเอง})
+ * - เพื่อนร่วมรายวิชาเห็นเฉพาะชื่อและห้อง (roster) ไม่เห็นรหัสหรือข้อมูลอื่นของกันและกัน
+ */
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function tok() { return request.auth.token; }
+    function sid() { return tok().get('sid', ''); }
+    function roles() { return tok().get('roles', []); }
+    function hasRole(r) { return signedIn() && roles().hasAny([r]); }
+    function isAdmin() { return hasRole('admin'); }
+    function isGradeAdmin() { return hasRole('grade_admin'); }
+    function isStaffRole() { return hasRole('admin') || hasRole('teacher') || hasRole('grade_admin'); }
+    function myStudentId() { return tok().get('stid', ''); }
+    function inSchool(data) { return signedIn() && data.schoolId == sid(); }
+    function offeringPath(oid) { return /databases/$(database)/documents/offerings/$(oid); }
+    function staffPath(oid) { return /databases/$(database)/documents/offerings/$(oid)/staff/$(request.auth.uid); }
+    function schoolWideStaff(oid) { return (isAdmin() || isGradeAdmin()) && get(offeringPath(oid)).data.schoolId == sid(); }
+    function teachesIn(oid) { return hasRole('teacher') && exists(staffPath(oid)) && get(staffPath(oid)).data.active == true; }
+    function isStaff(oid) { return signedIn() && (teachesIn(oid) || schoolWideStaff(oid)); }
+    function isEnrolled(oid) {
+      return hasRole('student') && myStudentId() != '' &&
+        exists(/databases/$(database)/documents/offerings/$(oid)/enrollments/$(myStudentId()));
+    }
+
+    match /schools/{schoolId} {
+      allow read: if signedIn() && sid() == schoolId;
+    }
+    match /schoolSecrets/{schoolId} {
+      allow read: if isAdmin() && sid() == schoolId;
+    }
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || (isAdmin() && resource.data.schoolId == sid()));
+    }
+    match /students/{studentId} {
+      allow read: if signedIn() && ((isStaffRole() && resource.data.schoolId == sid()) || myStudentId() == studentId);
+    }
+    match /teachers/{teacherId} {
+      allow read: if isStaffRole() && resource.data.schoolId == sid();
+    }
+    match /terms/{id} {
+      allow read: if inSchool(resource.data);
+    }
+    match /courses/{id} {
+      allow read: if inSchool(resource.data);
+    }
+    match /registrationRequests/{id} {
+      allow read: if isAdmin() && resource.data.schoolId == sid();
+    }
+    match /auditLog/{id} {
+      allow read: if isAdmin() && resource.data.schoolId == sid();
+    }
+    match /importJobs/{id} {
+      allow read: if isAdmin() && resource.data.schoolId == sid();
+    }
+    match /notifications/{uid}/items/{id} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow update: if signedIn() && request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']) && request.resource.data.readAt is string;
+    }
+
+    // นักเรียนค้นหารายวิชาของตนจากการลงทะเบียน (collection group)
+    match /{path=**}/enrollments/{studentId} {
+      allow list: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    match /offerings/{oid} {
+      allow get: if inSchool(resource.data) &&
+        (isAdmin() || isGradeAdmin() || request.auth.uid in resource.data.staffUids || isEnrolled(oid));
+      allow list: if inSchool(resource.data) && (isAdmin() || isGradeAdmin() || request.auth.uid in resource.data.staffUids);
+
+      match /staff/{uid} { allow read: if isStaff(oid); }
+      match /enrollments/{studentId} { allow read: if isStaff(oid) || (signedIn() && myStudentId() == studentId); }
+      match /roster/{studentId} { allow read: if isStaff(oid) || isEnrolled(oid); }
+      match /assessments/{aid} {
+        allow read: if isStaff(oid) || (isEnrolled(oid) && resource.data.status == 'published');
+      }
+      match /workGroups/{id} { allow read: if isStaff(oid) || isEnrolled(oid); }
+      match /groups/{id} { allow read: if isStaff(oid) || isEnrolled(oid); }
+      match /wgHistory/{id} { allow read: if isStaff(oid); }
+      match /submissions/{subId} {
+        allow read: if isStaff(oid) || (signedIn() && myStudentId() != '' && myStudentId() in resource.data.memberIds);
+        match /versions/{v} {
+          allow read: if isStaff(oid) || (signedIn() && myStudentId() != '' && myStudentId() in resource.data.memberIds);
+        }
+      }
+      match /drafts/{subId} {
+        allow read: if isStaff(oid) || (signedIn() && myStudentId() != '' && myStudentId() in resource.data.memberIds);
+      }
+      match /files/{fileId} {
+        allow read: if isStaff(oid) || (signedIn() && (resource.data.uploadedByUid == request.auth.uid ||
+          (myStudentId() != '' && myStudentId() in resource.data.readerIds)));
+      }
+      match /extensions/{id} {
+        allow read: if isStaff(oid) || (signedIn() && myStudentId() != '' && resource.data.targetId == myStudentId());
+      }
+      match /grades/{id} { allow read: if isStaff(oid); }
+      match /groupGrades/{id} { allow read: if isStaff(oid); }
+      match /revisions/{id} { allow read: if isStaff(oid); }
+      match /publications/{id} { allow read: if isStaff(oid); }
+      match /published/{studentId} { allow read: if isStaff(oid) || (signedIn() && myStudentId() == studentId); }
+    }
+
+    // ทุกอย่างที่ไม่ได้ระบุ: ปฏิเสธ (uniq, joinCodes, rateLimits, idempotency ฯลฯ ใช้ภายใน Cloud Functions เท่านั้น)
+    match /{document=**} { allow read, write: if false; }
+  }
+}
