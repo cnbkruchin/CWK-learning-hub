@@ -109,6 +109,8 @@ npm run test:e2e     # แอปจริงใน Chromium: ครู 2 + น�
 
 ## ติดตั้งใช้งานจริงบน Firebase
 
+> **คู่มือละเอียดทีละขั้นตอน (พร้อมเมนูใน Console, คำสั่ง Windows/macOS, การสร้างแอป Android/iOS และการแก้ปัญหา): [docs/09-firebase-setup.md](../docs/09-firebase-setup.md)** — ด้านล่างเป็นสรุปย่อ
+
 1. **สร้างโปรเจกต์** ที่ <https://console.firebase.google.com> แล้วเปลี่ยนเป็นแพ็กเกจ **Blaze** (จ่ายตามใช้ — Cloud Functions และ Cloud Storage ต้องใช้ Blaze; โรงเรียนขนาดกลางส่วนใหญ่อยู่ในโควตาฟรีรายเดือน แต่ต้องผูกบัตร ควรตั้ง Budget alert)
 2. เปิดบริการ: **Authentication** → Sign-in method → Email/Password · **Firestore** (โหมด production, ตำแหน่ง `asia-southeast1`) · **Storage** (ตำแหน่งเดียวกัน)
 3. Project settings → Your apps → เพิ่ม **Web app** → คัดลอกค่า config ใส่ `app/.env.local` (ดูตัวอย่าง `app/.env.example`; ค่าเหล่านี้ไม่ใช่ความลับ)

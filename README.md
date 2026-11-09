@@ -22,7 +22,7 @@ npm test             # 21 กรณี (Cloud Functions + Security Rules)
 npm run test:e2e     # 19 ขั้นตอน ในเบราว์เซอร์หลายเครื่องพร้อมกัน (ตรวจการอัปเดตเรียลไทม์)
 ```
 
-วิธี deploy, ติดตั้งบนมือถือ และ build แอป Android/iOS อยู่ใน [firebase/README.md](firebase/README.md) — ยังไม่ได้ deploy บนโปรเจกต์จริงและยังไม่ได้ build APK/IPA
+วิธี deploy, ติดตั้งบนมือถือ และ build แอป Android/iOS: คู่มือทีละขั้นตอน [docs/09-firebase-setup.md](docs/09-firebase-setup.md) (ภาพรวมใน [firebase/README.md](firebase/README.md)) — ยังไม่ได้ deploy บนโปรเจกต์จริงและยังไม่ได้ build APK/IPA
 
 | นักเรียนบนมือถือ | ครูให้คะแนนกลุ่ม → สมาชิกได้คะแนนอัตโนมัติ |
 | --- | --- |
@@ -71,6 +71,7 @@ npm run test:e2e     # 19 ขั้นตอน ในเบราว์เซ�
 | [06-deployment.md](docs/06-deployment.md) | ติดตั้งบน Google เผยแพร่เว็บแอป ระบบสาธิต สำรอง/กู้คืน รายการตรวจความปลอดภัย |
 | [07-traceability.md](docs/07-traceability.md) | จับคู่คำขอรอบนี้ ข้อกำหนด 18 ส่วน และเกณฑ์ A01–A24 กับผลทดสอบ |
 | [08-user-guide.md](docs/08-user-guide.md) | คู่มือย่อ ผู้ดูแล ครู นักเรียน |
+| [09-firebase-setup.md](docs/09-firebase-setup.md) | ติดตั้งรุ่นแอปมือถือบน Firebase ทีละขั้นตอน (Console, deploy, ผู้ดูแลคนแรก, PWA, Android, iOS, แก้ปัญหา) |
 
 ## เริ่มต้นเร็ว
 
