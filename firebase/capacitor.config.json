@@ -1,0 +1,21 @@
+{
+  "appId": "th.cwk.learninghub",
+  "appName": "CWK Learning Hub",
+  "webDir": "app/dist",
+  "backgroundColor": "#f6f7fb",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never"
+  },
+  "plugins": {
+    "SystemBars": {
+      "insetsHandling": "css",
+      "initialViewportFitValueHint": "cover"
+    }
+  }
+}

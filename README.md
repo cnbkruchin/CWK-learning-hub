@@ -9,6 +9,25 @@
 > ทดสอบกับบริการ Google จำลองและเบราว์เซอร์จริงแล้ว **ยังไม่ได้ทดสอบบนบัญชี Google จริง และยังไม่พร้อมใช้งานจริง**
 > ดูสิ่งที่ทำแล้ว/ยังไม่ทำใน [docs/07-traceability.md](docs/07-traceability.md)
 
+## 📱 รุ่นแอปมือถือ (Firebase · เรียลไทม์) — ใหม่ในรอบที่ 3
+
+โฟลเดอร์ [`firebase/`](firebase/README.md) คือระบบเดียวกันในรูปแบบ **แอปที่ติดตั้งได้ทั้ง iOS, Android และมือถืออื่น ๆ**
+(PWA + Capacitor) ใช้ **Firebase** (Firestore, Authentication, Cloud Functions, Storage) เป็นฐานข้อมูล
+และ **ทุกหน้าจออัปเดตแบบเรียลไทม์** — ครูประกาศคะแนน หน้าจอนักเรียนเปลี่ยนทันที, นักเรียนส่งงาน คิวตรวจของครูขึ้นทันที
+
+```bash
+cd firebase && npm install && (cd functions && npm install)
+npm run dev:demo     # ระบบสาธิตบน Firebase Emulator ที่ http://127.0.0.1:5173
+npm test             # 21 กรณี (Cloud Functions + Security Rules)
+npm run test:e2e     # 19 ขั้นตอน ในเบราว์เซอร์หลายเครื่องพร้อมกัน (ตรวจการอัปเดตเรียลไทม์)
+```
+
+วิธี deploy, ติดตั้งบนมือถือ และ build แอป Android/iOS อยู่ใน [firebase/README.md](firebase/README.md) — ยังไม่ได้ deploy บนโปรเจกต์จริงและยังไม่ได้ build APK/IPA
+
+| นักเรียนบนมือถือ | ครูให้คะแนนกลุ่ม → สมาชิกได้คะแนนอัตโนมัติ |
+| --- | --- |
+| <img src="docs/screenshots/mobile-student-course.png" width="260" alt="รายวิชาและงานของนักเรียนบนมือถือ"> | <img src="docs/screenshots/desktop-teacher-group-grading.png" width="560" alt="ให้คะแนนกลุ่ม"> |
+
 ## ทำอะไรได้แล้ว
 
 **นักเรียน** (ใช้บนมือถือได้)
@@ -75,7 +94,8 @@ tests/               ทดสอบบน Node.js กับบริการ G
   harness/           gas-fakes (Sheets/Drive/UrlFetch/Lock/Cache จำลอง), ตัวโหลด, ไฟล์ตัวอย่าง, ข้อมูลสาธิต
   e2e/               ทดสอบหน้าเว็บในเบราว์เซอร์
 tools/               dev-server (ทดลองบนเครื่อง), gen-schema-doc
-docs/                เอกสารออกแบบ คู่มือ ตัวอย่างรายงาน (samples/) และ requirements/master-prompt.md
+docs/                เอกสารออกแบบ คู่มือ ตัวอย่างรายงาน (samples/) ภาพหน้าจอ (screenshots/) และ requirements/master-prompt.md
+firebase/            รุ่นแอปมือถือ: Firebase + PWA + Capacitor (iOS/Android) อัปเดตเรียลไทม์ — ดู firebase/README.md
 ```
 
 ## หลักการสำคัญของการออกแบบ

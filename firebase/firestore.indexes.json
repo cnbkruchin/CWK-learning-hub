@@ -1,4 +1,30 @@
 {
-  "indexes": [],
-  "fieldOverrides": []
+  "indexes": [
+    { "collectionGroup": "offerings", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "schoolId", "order": "ASCENDING" }, { "fieldPath": "staffUids", "arrayConfig": "CONTAINS" }] },
+    { "collectionGroup": "students", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "schoolId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }] },
+    { "collectionGroup": "students", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "schoolId", "order": "ASCENDING" }, { "fieldPath": "code", "order": "ASCENDING" }] },
+    { "collectionGroup": "users", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "schoolId", "order": "ASCENDING" }, { "fieldPath": "roles", "arrayConfig": "CONTAINS" }] },
+    { "collectionGroup": "registrationRequests", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "schoolId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }] },
+    { "collectionGroup": "grades", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "assessmentId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }] },
+    { "collectionGroup": "groups", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "assessmentId", "order": "ASCENDING" }, { "fieldPath": "memberIds", "arrayConfig": "CONTAINS" }] },
+    { "collectionGroup": "submissions", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "assessmentId", "order": "ASCENDING" }, { "fieldPath": "currentVersionNo", "order": "ASCENDING" }] }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "enrollments",
+      "fieldPath": "uid",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
+      "collectionGroup": "enrollments",
+      "fieldPath": "studentId",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    }
+  ]
 }

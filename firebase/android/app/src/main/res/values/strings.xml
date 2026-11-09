@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CWK Learning Hub</string>
+    <string name="title_activity_main">CWK Learning Hub</string>
+    <string name="package_name">th.cwk.learninghub</string>
+    <string name="custom_url_scheme">th.cwk.learninghub</string>
+</resources>

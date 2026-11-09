@@ -6,22 +6,34 @@
   "scripts": {
     "shared": "node tools/sync-shared.mjs",
     "dev": "vite --config app/vite.config.js",
+    "dev:demo": "node scripts/dev-demo.mjs",
     "build": "vite build --config app/vite.config.js",
+    "preview": "vite preview --config app/vite.config.js",
     "emulators": "firebase emulators:start --project demo-cwk",
     "seed": "node scripts/seed.mjs",
-    "dev:demo": "node scripts/dev-demo.mjs",
     "test": "firebase emulators:exec --project demo-cwk --only auth,firestore,functions,storage \"node --test --test-concurrency=1 tests/*.test.mjs\"",
     "test:e2e": "firebase emulators:exec --project demo-cwk --only auth,firestore,functions,storage \"node tests-e2e/app.e2e.mjs\"",
+    "icons": "node tools/make-icons.mjs",
+    "cap:assets": "npx @capacitor/assets@3 generate --ios --android --assetPath resources --iconBackgroundColor '#1f5fbf' --iconBackgroundColorDark '#1f5fbf' --splashBackgroundColor '#f6f7fb' --splashBackgroundColorDark '#11151c'",
     "cap:sync": "npm run build && cap sync",
     "cap:android": "npm run build && cap sync android && cap open android",
-    "cap:ios": "npm run build && cap sync ios && cap open ios"
+    "cap:ios": "npm run build && cap sync ios && cap open ios",
+    "deploy": "npm run build && firebase deploy"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@capacitor/android": "^8.6.0",
+    "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.6.0",
+    "@capacitor/filesystem": "^8.1.5",
     "@capacitor/ios": "^8.6.0",
-    "firebase": "^13.2.0"
+    "@capacitor/share": "^8.0.3",
+    "@fontsource/sarabun": "^5.3.0",
+    "firebase": "^13.2.0",
+    "html-to-image": "^1.11.13",
+    "jspdf": "^4.2.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.6.0",
